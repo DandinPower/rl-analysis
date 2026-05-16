@@ -5,6 +5,13 @@
 3. This repo already installed all the required packages in the virtual environment. 
 4. Use `gitingest` under `rl/analysis` to generate a `digest.txt` file that contains all the necessary sourcecodes that can be used for report listing.
 
+# Analysis Branch Scope
+
+1. Keep all new implementation for this branch inside the `analysis/` folder.
+2. Do not modify original project code or root project files unless the user explicitly asks for that change.
+3. Put analysis-specific dependency files, scripts, generated tables, figures, and notes under `analysis/`.
+4. Use `analysis/requirements.txt` for the lightweight result-analysis environment.
+
 # LaTeX Writing Conventions
 
 1. Avoid using enumerate or itemize environments in LaTeX documents. Instead, use simple paragraphs or sections to present information.
