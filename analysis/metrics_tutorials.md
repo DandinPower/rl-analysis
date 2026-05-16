@@ -116,7 +116,7 @@ Important fields:
 
 `sample_age_mean_last_10pct`: the mean age of sampled replay transitions during the last 10 percent of updates. The age is measured in environment steps between when a transition was collected and when it was sampled for training. A large mean sample age means updates used a mix of older and newer experience.
 
-`sample_consecutive_transition_fraction_last_10pct`: the fraction of sampled transition pairs that were adjacent in the original trajectory during the last 10 percent of updates. Lower values mean better decorrelation.
+`sample_consecutive_transition_fraction_last_10pct`: how often a replay batch contained transitions that came from right next to each other in the same original episode, measured during the last 10 percent of updates. A transition is one stored experience tuple, such as state, action, reward, next state, and done. Consecutive transitions are neighbors in time: for example, step 101 and step 102 from the same episode. If this fraction is high, the batch is using many near-duplicate moments from the same short time period, so the samples are still correlated. If it is low, the batch is mixed from different times or episodes, which is better decorrelation.
 
 If replay is removed, the agent usually trains on recent correlated data. That can make learning more like chasing a moving target from a narrow stream of experience. In the report, the no-replay ablation should be read mostly as a test of decorrelation and sample reuse.
 
