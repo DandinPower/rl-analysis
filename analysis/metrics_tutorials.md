@@ -8,9 +8,11 @@ For supervised learning, a lower validation loss is often close to the final goa
 
 In these logs, the main policy-quality fields are in `eval_metrics.jsonl` and `summary.json`.
 
-`return_mean` is the average evaluation return over a fixed number of evaluation episodes. This is the closest metric to final task performance. For LunarLander, a return above 200 is usually treated as solved.
+When this guide uses a statistic word such as mean, average, standard deviation, percentile, minimum, maximum, median, or confidence interval, read it together with the group being summarized. The group may be evaluation episodes from one checkpoint, random seeds from one variant, evaluation checkpoints across one training run, or update batches from the last part of training. For example, a mean over evaluation episodes describes one checkpoint, while a mean over seeds describes one variant across repeated runs.
 
-`return_std`, `return_p25`, `return_p75`, `return_min`, and `return_max` show how much one evaluation batch varies. High within-evaluation variance means the same checkpoint can sometimes land well and sometimes fail.
+`return_mean` is the arithmetic mean of the returns from one evaluation batch. If evaluation runs 20 episodes at one checkpoint, add the 20 episode returns and divide by 20. This value represents the center of that checkpoint's episode-return range. It is the closest metric to final task performance. For LunarLander, a return above 200 is usually treated as solved.
+
+`return_std`, `return_p25`, `return_p75`, `return_min`, and `return_max` describe the spread of episode returns inside the same evaluation batch. `return_std` is the standard deviation across those evaluation episodes. `return_p25` and `return_p75` are the 25th and 75th percentiles across those episodes. `return_min` and `return_max` are the lowest and highest episode returns in that batch. High within-evaluation spread means the same checkpoint can sometimes land well and sometimes fail.
 
 `final_eval_return_mean` in `summary.json` is the last evaluation return. It answers: how good was the policy at the end of training?
 
@@ -22,7 +24,7 @@ In these logs, the main policy-quality fields are in `eval_metrics.jsonl` and `s
 
 A single final score hides the training path. In DQN, two runs can have the same final return but very different stories. One may learn early and stay stable. Another may fail for most of training and recover near the end. The evaluation learning curve shows this.
 
-Check `global_env_step` against `return_mean`. Then compare variants at the same environment step, not at the same wall-clock time. Environment steps measure sample budget and make the ablation fair.
+Check `global_env_step` against `return_mean`. Here `return_mean` is still the mean across evaluation episodes at that checkpoint. Then compare variants at the same environment step, not at the same wall-clock time. Environment steps measure sample budget and make the ablation fair.
 
 Useful questions:
 
@@ -32,31 +34,37 @@ Does it stay above 200 after crossing, or does it collapse?
 
 Does it improve smoothly, or jump sharply after a long flat period?
 
-Does the mean curve hide large seed variance?
+Does the mean curve hide large seed variance? Here the mean curve usually means the average of `return_mean` values across seeds at the same evaluation step.
 
-`area_under_eval_curve` is the trapezoid area under the evaluation curve. Take each evaluation point from `eval_metrics.jsonl` as a pair `(global_env_step, return_mean)`. For each neighboring pair, multiply the step gap by the average of the two returns, then add those pieces together:
+`area_under_eval_curve` summarizes the whole evaluation learning curve for one run. The x-axis is `global_env_step`, which is how many environment interactions have happened. The y-axis is `return_mean`, which is the mean return across evaluation episodes at that checkpoint. The area is large when the policy reaches high evaluation return early and stays high for many environment steps.
+
+The calculation uses the trapezoid rule. Take each logged evaluation point from `eval_metrics.jsonl` as a pair `(global_env_step, return_mean)`. For each neighboring pair, draw a straight line between the two returns. The area for that interval is the width in environment steps multiplied by the average height of the two endpoint returns:
 
 `area = sum((step_i - step_{i-1}) * (return_i + return_{i-1}) / 2)`
 
-For example, if the logged evaluation points are `(100000, -100)`, `(200000, 50)`, and `(300000, 200)`, the area is `100000 * (-100 + 50) / 2 + 100000 * (50 + 200) / 2 = -2500000 + 12500000 = 10000000`. The implementation only uses intervals between logged evaluation points. It does not add an extra interval from step 0 unless step 0 is actually logged.
+You can calculate it by hand in three steps. First, sort the evaluation rows by `global_env_step`. Second, for each adjacent pair, compute `step gap = later step - earlier step` and `average return = (earlier return_mean + later return_mean) / 2`. Third, multiply `step gap * average return` for each pair and add the interval areas.
+
+For example, suppose the logged evaluation points are `(100000, -100)`, `(200000, 50)`, and `(300000, 200)`. The first interval has width `200000 - 100000 = 100000` steps and average return `(-100 + 50) / 2 = -25`, so its area is `100000 * -25 = -2500000`. The second interval has width `300000 - 200000 = 100000` steps and average return `(50 + 200) / 2 = 125`, so its area is `100000 * 125 = 12500000`. The total `area_under_eval_curve` is `-2500000 + 12500000 = 10000000`.
+
+The area can be negative if returns are negative for enough of training. Its unit is return-times-steps, not plain return. The implementation only uses intervals between logged evaluation points. It does not add an extra interval from step 0 unless step 0 is actually logged.
 
 `normalized_area_under_eval_curve` divides that area by the configured training step budget:
 
 `normalized AUC = area_under_eval_curve / total_env_steps`
 
-If the training budget is `300000` steps in the example above, normalized AUC is `10000000 / 300000 = 33.33`. The result is in return units, so it can be read as the step-weighted average evaluation return across training. It is not scaled to a 0 to 1 range. A higher normalized AUC means the agent learned earlier, kept return high longer, or both.
+If the training budget is `300000` steps in the example above, normalized AUC is `10000000 / 300000 = 33.33`. The result is in return units, so it is easier to compare with normal return values. It is not scaled to a 0 to 1 range. Because the numerator only includes logged intervals, the value is best read as the training-budget-normalized area from the logged evaluation curve. When evaluation logging covers the training run regularly, it behaves like a step-weighted average evaluation return: each return value influences the summary in proportion to how many environment steps it covers. A higher normalized AUC means the agent learned earlier, kept return high longer, or both.
 
 ## 3. Sample Efficiency: How Much Experience Was Needed?
 
 Sample efficiency is about how many environment interactions were needed before the agent became good. In these logs, the main fields are:
 
-`first_step_reaching_threshold`: the first evaluation step where mean return reached the success threshold.
+`first_step_reaching_threshold`: the first evaluation checkpoint where `return_mean` reached the success threshold. In this sentence, mean return means the arithmetic mean across the evaluation episodes at that checkpoint. If the threshold is 200 and the 160000-step evaluation has episode returns whose average is 205, then the run reached the threshold at 160000 steps, unless an earlier evaluation also averaged at least 200.
 
-`first_step_sustained_threshold`: the first step where the run stayed above threshold for a window of evaluations.
+`first_step_sustained_threshold`: the first evaluation checkpoint where the run stayed above threshold for a window of evaluations. The window is a sequence of neighboring evaluation checkpoints, and each checkpoint is judged by its `return_mean` across evaluation episodes.
 
 `never_reached_threshold`: whether the run failed to reach the threshold at all.
 
-For a fair comparison, use the same threshold for every variant. For LunarLander, this project uses return >= 200. Compare the median first reach step across seeds, but also report how many seeds reached it. A variant with a fast median over only two successful seeds is not better than a variant that reaches the threshold in all seeds.
+For a fair comparison, use the same threshold for every variant. For LunarLander, this project uses return >= 200. Compare the median first reach step across seeds. Here median means the middle first-reach value after sorting the successful seeds for the same variant. Also report how many seeds reached it. A variant with a fast median over only two successful seeds is not better than a variant that reaches the threshold in all seeds.
 
 ## 4. Stability: RL Can Learn and Then Forget
 
@@ -64,13 +72,13 @@ DQN is bootstrapped: it learns Q-values from targets that depend on other Q-valu
 
 The main stability fields are:
 
-`catastrophic_collapse_count`: how many times evaluation return dropped by a large fraction after the run had already crossed the success threshold.
+`catastrophic_collapse_count`: how many times `return_mean` at an evaluation checkpoint dropped by a large fraction after the run had already crossed the success threshold. The drop is measured along one run's evaluation checkpoints.
 
-`largest_eval_drop`: the largest absolute evaluation drop after a previous best.
+`largest_eval_drop`: the largest absolute drop in `return_mean` from a previous best checkpoint to a later checkpoint in the same run.
 
-`eval_return_std_across_time`: how much the evaluation return moved over training.
+`eval_return_std_across_time`: the standard deviation of `return_mean` values across evaluation checkpoints in one run. It describes how much the evaluation curve moved over training.
 
-`rolling_return_std_mean`: how noisy the recent training returns were.
+`rolling_return_std_mean`: the mean of rolling standard deviations of recent training episode returns. The standard deviation is computed inside each rolling window, then those window-level values are averaged.
 
 Always interpret collapse count with threshold reach rate. A run that never learns may have zero collapses only because it never reached a level from which it could collapse.
 
@@ -80,11 +88,11 @@ RL training is sensitive to random seeds because the seed affects initialization
 
 For each variant, compare:
 
-Mean final return across seeds.
+Mean final return across seeds. This is the arithmetic mean of each seed's final evaluation return for the same variant.
 
-Seed standard deviation.
+Seed standard deviation. This is the standard deviation of final evaluation returns across seeds for the same variant.
 
-95 percent confidence interval of the seed mean.
+95 percent confidence interval of the seed mean. This is the uncertainty range around the across-seed mean, not a range containing 95 percent of episodes.
 
 How many seeds solved the task at the end.
 
@@ -104,9 +112,9 @@ Important fields:
 
 `final_buffer_size`: how many transitions were in the buffer at the end.
 
-`sample_age_mean_last_10pct`: how old sampled transitions were late in training. A large sample age means updates used a mix of older and newer experience.
+`sample_age_mean_last_10pct`: the mean age of sampled replay transitions during the last 10 percent of updates. The age is measured in environment steps between when a transition was collected and when it was sampled for training. A large mean sample age means updates used a mix of older and newer experience.
 
-`sample_consecutive_transition_fraction_last_10pct`: how often sampled transitions were adjacent in the original trajectory. Lower values mean better decorrelation.
+`sample_consecutive_transition_fraction_last_10pct`: the fraction of sampled transition pairs that were adjacent in the original trajectory during the last 10 percent of updates. Lower values mean better decorrelation.
 
 If replay is removed, the agent usually trains on recent correlated data. That can make learning more like chasing a moving target from a narrow stream of experience. In the report, the no-replay ablation should be read mostly as a test of decorrelation and sample reuse.
 
@@ -120,9 +128,9 @@ Important fields:
 
 `target_update_count`: how many hard or soft target updates occurred.
 
-`online_target_param_l2_mean`: how far the online and target networks were from each other on average.
+`online_target_param_l2_mean`: the mean L2 parameter distance between the online and target networks across logged measurements. It describes the typical separation between the two networks.
 
-`target_q_mean_last_10pct`: the mean target-side Q-value late in training.
+`target_q_mean_last_10pct`: the mean target-side Q-value over update batches from the last 10 percent of training.
 
 Removing the target network can sometimes still solve a simple environment, but the expected risk is more oscillation, larger collapses, or worse retention.
 
@@ -132,13 +140,13 @@ TD error is the difference between the current Q estimate and the Bellman target
 
 Important fields:
 
-`td_loss_mean_last_10pct`: average TD loss late in training.
+`td_loss_mean_last_10pct`: the mean TD loss over update batches from the last 10 percent of training.
 
-`td_error_abs_mean_last_10pct`: mean absolute TD error late in training.
+`td_error_abs_mean_last_10pct`: the mean absolute TD error over update batches from the last 10 percent of training.
 
-`td_error_abs_p95_last_10pct`: tail TD error. This is often more useful than the mean because rare bad targets can destabilize training.
+`td_error_abs_p95_last_10pct`: the 95th percentile of absolute TD errors over update batches from the last 10 percent of training. This describes the large-error tail and is often more useful than the mean because rare bad targets can destabilize training.
 
-`grad_norm_mean_last_10pct` and `grad_norm_max`: gradient scale.
+`grad_norm_mean_last_10pct` and `grad_norm_max`: gradient scale. The mean is over update batches from the last 10 percent of training, while the max is the largest logged gradient norm.
 
 `gradient_clip_fraction`: fraction of updates where clipping was active.
 
@@ -150,11 +158,11 @@ DQN can overestimate action values because the max over noisy Q estimates tends 
 
 Important fields:
 
-`online_q_mean_last_10pct`: average online Q-value late in training.
+`online_q_mean_last_10pct`: the mean online Q-value over update batches from the last 10 percent of training.
 
-`online_q_max_mean_last_10pct`: average max action value late in training.
+`online_q_max_mean_last_10pct`: the mean of the maximum online action value over update batches from the last 10 percent of training.
 
-`target_q_mean_last_10pct`: average target Q-value late in training.
+`target_q_mean_last_10pct`: the mean target Q-value over update batches from the last 10 percent of training.
 
 `q_overestimation_proxy_last10`: a proxy comparing online max values to target values.
 
@@ -168,11 +176,11 @@ Dueling DQN separates Q(s, a) into a state-value stream and an action-advantage 
 
 Useful logged fields in update metrics include:
 
-`dueling.value_stream_mean` and `dueling.value_stream_std`.
+`dueling.value_stream_mean` and `dueling.value_stream_std`: the mean and standard deviation of the dueling value-stream outputs over logged update batches.
 
-`dueling.advantage_abs_mean`.
+`dueling.advantage_abs_mean`: the mean absolute advantage-stream output over logged update batches.
 
-`dueling.action_gap_mean`.
+`dueling.action_gap_mean`: the mean gap between the best action value and the next alternatives over logged update batches.
 
 The action gap is the difference between the best action value and the next alternatives. A larger useful gap can make the greedy policy more decisive, but a too-large gap with bad return can mean the network is confidently wrong.
 
@@ -182,19 +190,19 @@ Return tells you whether the agent did well. Environment-specific metrics help e
 
 Useful fields under `lunarlander_eval`:
 
-`success_rate`: fraction of evaluation episodes with return >= 200.
+`success_rate`: fraction of evaluation episodes in one evaluation batch with return >= 200.
 
-`landing_success_rate`: fraction of episodes ending in a successful landing condition.
+`landing_success_rate`: fraction of evaluation episodes in one evaluation batch ending in a successful landing condition.
 
-`crash_rate`: fraction of episodes ending in a crash.
+`crash_rate`: fraction of evaluation episodes in one evaluation batch ending in a crash.
 
-`timeout_rate`: fraction of episodes that reached the time limit.
+`timeout_rate`: fraction of evaluation episodes in one evaluation batch that reached the time limit.
 
-`both_legs_contact_rate`, `one_leg_contact_rate`, and `no_leg_contact_rate`: final contact behavior.
+`both_legs_contact_rate`, `one_leg_contact_rate`, and `no_leg_contact_rate`: fractions of evaluation episodes in one evaluation batch with each final contact behavior.
 
-`main_engine_action_fraction_mean` and `side_engine_action_fraction_mean`: engine usage. High main-engine use may indicate hovering or inefficient control. High side-engine use may indicate strong attitude correction.
+`main_engine_action_fraction_mean` and `side_engine_action_fraction_mean`: mean fractions of actions that used the main engine or side engines across evaluation episodes. High main-engine use may indicate hovering or inefficient control. High side-engine use may indicate strong attitude correction.
 
-`episode_length_mean`: long episodes can mean stable hovering, slow landing, or timeouts. Use it with success, crash, and timeout rates.
+`episode_length_mean`: the mean episode length across evaluation episodes in one evaluation batch. Long episodes can mean stable hovering, slow landing, or timeouts. Use it with success, crash, and timeout rates.
 
 ## 12. A Practical Comparison Checklist
 
