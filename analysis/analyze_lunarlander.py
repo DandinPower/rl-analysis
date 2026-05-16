@@ -1055,7 +1055,9 @@ In these logs, the main policy-quality fields are in `eval_metrics.jsonl` and `s
 
 When this guide uses a statistic word such as mean, average, standard deviation, percentile, minimum, maximum, median, or confidence interval, read it together with the group being summarized. The group may be evaluation episodes from one checkpoint, random seeds from one variant, evaluation checkpoints across one training run, or update batches from the last part of training. For example, a mean over evaluation episodes describes one checkpoint, while a mean over seeds describes one variant across repeated runs.
 
-`return_mean` is the arithmetic mean of the returns from one evaluation batch. If evaluation runs 20 episodes at one checkpoint, add the 20 episode returns and divide by 20. This value represents the center of that checkpoint's episode-return range. It is the closest metric to final task performance. For LunarLander, a return above 200 is usually treated as solved.
+An evaluation checkpoint is not a training episode. It is a measurement taken after the agent has already collected some amount of training experience. For example, `global_env_step = 160000` means the agent has collected 160000 training environment steps, then the current policy is evaluated separately. The evaluation episodes are dedicated test runs of that checkpoint policy, usually without the same exploration behavior used during training. Therefore, `return_mean` is related to training only by timing: it tells you how well the current checkpoint performs after that much training experience.
+
+`return_mean` is the arithmetic mean of the returns from one evaluation batch. If evaluation runs 20 dedicated evaluation episodes at one checkpoint, add the 20 episode returns and divide by 20. This value represents the center of that checkpoint's evaluation episode-return range. It is the closest metric to final task performance. For LunarLander, a return above 200 is usually treated as solved.
 
 `return_std`, `return_p25`, `return_p75`, `return_min`, and `return_max` describe the spread of episode returns inside the same evaluation batch. `return_std` is the standard deviation across those evaluation episodes. `return_p25` and `return_p75` are the 25th and 75th percentiles across those episodes. `return_min` and `return_max` are the lowest and highest episode returns in that batch. High within-evaluation spread means the same checkpoint can sometimes land well and sometimes fail.
 
@@ -1069,7 +1071,7 @@ When this guide uses a statistic word such as mean, average, standard deviation,
 
 A single final score hides the training path. In DQN, two runs can have the same final return but very different stories. One may learn early and stay stable. Another may fail for most of training and recover near the end. The evaluation learning curve shows this.
 
-Check `global_env_step` against `return_mean`. Here `return_mean` is still the mean across evaluation episodes at that checkpoint. Then compare variants at the same environment step, not at the same wall-clock time. Environment steps measure sample budget and make the ablation fair.
+Check `global_env_step` against `return_mean`. Then compare variants at the same environment step, not at the same wall-clock time. Environment steps measure sample budget and make the ablation fair.
 
 Useful questions:
 
@@ -1103,7 +1105,7 @@ If the training budget is `300000` steps in the example above, normalized AUC is
 
 Sample efficiency is about how many environment interactions were needed before the agent became good. In these logs, the main fields are:
 
-`first_step_reaching_threshold`: the first evaluation checkpoint where `return_mean` reached the success threshold. In this sentence, mean return means the arithmetic mean across the evaluation episodes at that checkpoint. If the threshold is 200 and the 160000-step evaluation has episode returns whose average is 205, then the run reached the threshold at 160000 steps, unless an earlier evaluation also averaged at least 200.
+`first_step_reaching_threshold`: the first evaluation checkpoint where `return_mean` reached the success threshold. If the threshold is 200 and the 160000-step evaluation has episode returns whose average is 205, then the run reached the threshold at 160000 steps, unless an earlier evaluation also averaged at least 200.
 
 `first_step_sustained_threshold`: the first evaluation checkpoint where the run stayed above threshold for a window of evaluations. The window is a sequence of neighboring evaluation checkpoints, and each checkpoint is judged by its `return_mean` across evaluation episodes.
 
