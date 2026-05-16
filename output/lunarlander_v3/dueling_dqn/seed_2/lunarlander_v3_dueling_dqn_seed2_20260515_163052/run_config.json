@@ -1,0 +1,100 @@
+{
+  "algorithm": {
+    "base": "DQN",
+    "use_double_dqn": false,
+    "use_dueling_network": true,
+    "use_noisy_network": false,
+    "use_prioritized_replay": false,
+    "use_replay_buffer": true,
+    "use_reward_clipping": false,
+    "use_target_network": true
+  },
+  "code": {
+    "dirty_working_tree": true,
+    "git_branch": null,
+    "git_commit": null
+  },
+  "datetime_end": "2026-05-15T16:43:38.858580+00:00",
+  "datetime_start": "2026-05-15T16:30:52.056622+00:00",
+  "dqn_hyperparameters": {
+    "batch_size": 64,
+    "gamma": 0.99,
+    "gradient_steps_per_train": 1,
+    "learning_starts": 5000,
+    "max_grad_norm": 10.0,
+    "replay_buffer_size": 100000,
+    "target_update_frequency_env_steps": 1000,
+    "target_update_tau": 1.0,
+    "train_frequency_env_steps": 4
+  },
+  "env_id": "LunarLander-v3",
+  "environment": {
+    "action_space_type": "discrete",
+    "env_id": "LunarLander-v3",
+    "frame_skip": null,
+    "frame_stack": null,
+    "grayscale": null,
+    "max_episode_steps": null,
+    "network_architecture": "mlp",
+    "noop_max": null,
+    "observation_type": "vector",
+    "resize_shape": null,
+    "reward_clipping": false,
+    "slug": "lunarlander_v3",
+    "success_threshold": 200.0,
+    "terminal_on_life_loss": null
+  },
+  "experiment_group": "dqn_ablation_lunarlander_freeway",
+  "exploration": {
+    "epsilon_decay_env_steps": 100000,
+    "epsilon_final": 0.05,
+    "epsilon_start": 1.0,
+    "eval_epsilon": 0.001,
+    "type": "epsilon_greedy"
+  },
+  "hardware": {
+    "cpu_name": "x86_64",
+    "device": "cuda",
+    "gpu_name": "NVIDIA GeForce RTX 5090",
+    "ram_gb": null
+  },
+  "network": {
+    "activation": "relu",
+    "architecture": "mlp",
+    "dueling_aggregation": "mean_subtraction",
+    "hidden_layers": [
+      128,
+      128
+    ],
+    "initializer": "orthogonal",
+    "num_parameters": 18309
+  },
+  "optimizer": {
+    "epsilon": 1e-08,
+    "gradient_clip_norm": 10.0,
+    "learning_rate": 0.0005,
+    "name": "Adam",
+    "weight_decay": 0.0
+  },
+  "run_id": "lunarlander_v3_dueling_dqn_seed2_20260515_163052",
+  "seed": 2,
+  "software": {
+    "ale_py_version": null,
+    "gymnasium_version": "1.3.0",
+    "numpy_version": "2.4.4",
+    "platform": "Linux-6.8.0-111-generic-x86_64-with-glibc2.39",
+    "python_version": "3.12.3",
+    "torch_version": "2.12.0+cu130"
+  },
+  "status": "completed",
+  "training_budget": {
+    "checkpoint_frequency_env_steps": 50000,
+    "eval_frequency_env_steps": 10000,
+    "max_episode_steps": null,
+    "max_episodes": null,
+    "num_seeds": 5,
+    "total_env_steps": 500000
+  },
+  "variant": "dueling_dqn",
+  "variant_label": "Dueling DQN"
+}
