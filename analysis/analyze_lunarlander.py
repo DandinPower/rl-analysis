@@ -1185,11 +1185,15 @@ Removing the target network can sometimes still solve a simple environment, but 
 
 TD error is the difference between the current Q estimate and the Bellman target. It is the DQN analogue of a regression residual, but the target itself is learned and non-stationary.
 
+TD error and TD loss are related, but they are not the same thing. TD error is the raw signed prediction mistake for one sampled transition: `current Q - target Q`. Its sign tells whether the network estimated the action value too high or too low. The absolute TD error ignores the sign and measures mistake size. TD loss is the training objective computed from TD errors over a batch, often by squaring the errors or using a Huber loss. The optimizer directly minimizes TD loss, not the raw TD error.
+
+This difference matters when reading diagnostics. TD error metrics tell you how large the Bellman prediction mistakes are, including the tail of rare large mistakes. TD loss tells you how strongly those mistakes are being turned into an optimization signal. A few very large TD errors can dominate squared loss and create large gradients, while mean absolute TD error may look moderate. A low TD loss also does not prove the policy is good, because the network can fit unhelpful replay data or a moving target while evaluation return stays poor.
+
 Important fields:
 
-`td_loss_mean_last_10pct`: the mean TD loss over update batches from the last 10 percent of training.
+`td_loss_mean_last_10pct`: the mean optimizer loss computed from TD errors over update batches from the last 10 percent of training.
 
-`td_error_abs_mean_last_10pct`: the mean absolute TD error over update batches from the last 10 percent of training.
+`td_error_abs_mean_last_10pct`: the mean absolute raw Bellman prediction mistake over update batches from the last 10 percent of training.
 
 `td_error_abs_p95_last_10pct`: the 95th percentile of absolute TD errors over update batches from the last 10 percent of training. This describes the large-error tail and is often more useful than the mean because rare bad targets can destabilize training.
 
