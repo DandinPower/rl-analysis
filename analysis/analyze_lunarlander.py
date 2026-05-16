@@ -1079,7 +1079,17 @@ Does it improve smoothly, or jump sharply after a long flat period?
 
 Does the mean curve hide large seed variance?
 
-`area_under_eval_curve` and `normalized_area_under_eval_curve` summarize the whole learning curve. In this report, normalized AUC is roughly the average evaluation return over the training budget. A high normalized AUC means the agent was useful for more of training, not only at the end.
+`area_under_eval_curve` is the trapezoid area under the evaluation curve. Take each evaluation point from `eval_metrics.jsonl` as a pair `(global_env_step, return_mean)`. For each neighboring pair, multiply the step gap by the average of the two returns, then add those pieces together:
+
+`area = sum((step_i - step_{i-1}) * (return_i + return_{i-1}) / 2)`
+
+For example, if the logged evaluation points are `(100000, -100)`, `(200000, 50)`, and `(300000, 200)`, the area is `100000 * (-100 + 50) / 2 + 100000 * (50 + 200) / 2 = -2500000 + 12500000 = 10000000`. The implementation only uses intervals between logged evaluation points. It does not add an extra interval from step 0 unless step 0 is actually logged.
+
+`normalized_area_under_eval_curve` divides that area by the configured training step budget:
+
+`normalized AUC = area_under_eval_curve / total_env_steps`
+
+If the training budget is `300000` steps in the example above, normalized AUC is `10000000 / 300000 = 33.33`. The result is in return units, so it can be read as the step-weighted average evaluation return across training. It is not scaled to a 0 to 1 range. A higher normalized AUC means the agent learned earlier, kept return high longer, or both.
 
 ## 3. Sample Efficiency: How Much Experience Was Needed?
 
