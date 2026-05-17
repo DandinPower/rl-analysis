@@ -84,6 +84,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default="output", help="Root containing output/lunarlander_v3.")
     parser.add_argument("--analysis-dir", default="analysis", help="Directory for generated analysis artifacts.")
     parser.add_argument("--env-slug", default="lunarlander_v3", help="Environment slug under output-root.")
+    parser.add_argument("--report-name", default="lunarlander_report_v0.md", help="Generated markdown report filename.")
+    parser.add_argument("--report-title", default="LunarLander Report v0", help="Generated markdown report title.")
     return parser.parse_args()
 
 
@@ -215,6 +217,21 @@ def mean_ci_text(mean: float, ci: float, digits: int = 1) -> str:
     if ci is None or math.isnan(float(ci)):
         return format_number(mean, digits)
     return f"{format_number(mean, digits)} +/- {format_number(ci, digits)}"
+
+
+def count_text(count: int, total: int, noun: str = "seed") -> str:
+    if count == 0:
+        return f"no {noun}s"
+    if count == total:
+        return f"all {total} {noun}s"
+    return f"{count}/{total} {noun}s"
+
+
+def seed_list_text(seeds: Iterable[int]) -> str:
+    values = [str(int(seed)) for seed in seeds]
+    if not values:
+        return "none"
+    return ", ".join(values)
 
 
 def markdown_table(headers: list[str], rows: list[list[object]]) -> str:
@@ -710,7 +727,8 @@ def plot_final_return(summary_df: pd.DataFrame, figures_dir: Path) -> None:
         ax.scatter(np.full(len(values), index) + jitter, values, color=COLORS[variant], s=32, zorder=3)
     ax.axhline(200, color="#333333", linestyle="--", linewidth=1.1, label="success threshold")
     ax.set_ylabel("Final evaluation return")
-    ax.set_title("Final return distribution across five seeds")
+    seed_count = int(summary_df.groupby("variant", observed=True)["seed"].nunique().max())
+    ax.set_title(f"Final return distribution across {seed_count} seeds")
     ax.legend(loc="lower left")
     fig.tight_layout()
     fig.savefig(figures_dir / "fig_final_return_distribution.png", bbox_inches="tight")
@@ -1284,6 +1302,10 @@ def write_report(
     variant_summary: pd.DataFrame,
     paired: pd.DataFrame,
     final_behavior: pd.DataFrame,
+    report_name: str,
+    report_title: str,
+    output_root: Path,
+    env_slug: str,
 ) -> None:
     vs = variant_summary.set_index("variant")
     baseline = vs.loc["dqn"]
@@ -1298,6 +1320,49 @@ def write_report(
     dqn_bad_seeds = dqn_seed_values[dqn_seed_values["final_return"] < dqn_seed_values["success_threshold"]]
     best_final_variant = variant_summary.sort_values("final_return_mean", ascending=False).iloc[0]
     best_auc_variant = variant_summary.sort_values("normalized_auc_mean", ascending=False).iloc[0]
+    seed_count = int(variant_summary["n"].max())
+    output_path = output_root / env_slug
+    success_threshold = summary_df["success_threshold"].dropna().iloc[0]
+    baseline_auc_sentence = (
+        "the highest among these variants"
+        if str(best_auc_variant["variant"]) == "dqn"
+        else f"below {best_auc_variant['variant_label']}, the highest-AUC variant"
+    )
+    no_replay_collapse_sentence = (
+        "The variant never crossed the threshold, so it had no successful regime from which to collapse."
+        if int(no_replay["threshold_reach_count"]) == 0
+        else "Interpret this collapse count together with the low threshold reach rate, because weak runs can have few collapses simply by spending little time in a successful regime."
+    )
+    replay_conclusion = (
+        "Experience replay is essential in this experiment. Removing replay prevented every seed from reaching the success threshold."
+        if int(no_replay["threshold_reach_count"]) == 0
+        else f"Experience replay is essential in this experiment. Removing replay reached the success threshold in only {count_text(int(no_replay['threshold_reach_count']), int(no_replay['n']))} and had the worst normalized AUC."
+    )
+    baseline_conclusion = (
+        "Baseline DQN learned early, which gave it the best normalized AUC, but it often failed to retain its best policy until the final checkpoint."
+        if str(best_auc_variant["variant"]) == "dqn"
+        else f"Baseline DQN learned early, but {best_auc_variant['variant_label']} had the best normalized AUC in this result set."
+    )
+    double_dueling_conclusion = (
+        "Double + Dueling DQN showed high upside but worse reliability than Dueling DQN alone in this result set."
+        if double_dueling["final_return_std"] >= dueling["final_return_std"]
+        else "Double + Dueling DQN was competitive, but it did not improve clearly over Dueling DQN alone in this result set."
+    )
+    dueling_intro = (
+        f"{VARIANT_NOTES['dueling_dqn']} Dueling DQN had the best final mean return: {mean_ci_text(dueling['final_return_mean'], dueling['final_return_ci95'])}."
+        if str(best_final_variant["variant"]) == "dueling_dqn"
+        else f"{VARIANT_NOTES['dueling_dqn']} Dueling DQN had final mean return {mean_ci_text(dueling['final_return_mean'], dueling['final_return_ci95'])}; the strongest final mean in this result set was {best_final_variant['variant_label']} at {mean_ci_text(best_final_variant['final_return_mean'], best_final_variant['final_return_ci95'])}."
+    )
+    dueling_interpretation = (
+        "The result suggests that separating state value from action advantage helped late policy quality and stability more than early learning speed."
+        if float(dueling["final_return_mean"]) > float(baseline["final_return_mean"])
+        else "In this 10-seed result set, the dueling head slightly reduced collapse count but did not improve mean final return over baseline, so its benefit is weaker than in the earlier five-seed summary."
+    )
+    final_performance_conclusion = (
+        "Dueling DQN was the strongest final performer and had fewer collapses than baseline, suggesting better late-training value representation for LunarLander."
+        if str(best_final_variant["variant"]) == "dueling_dqn"
+        else f"{best_final_variant['variant_label']} had the strongest final mean return, while baseline DQN kept the best normalized AUC."
+    )
 
     def paired_sentence(variant: str) -> str:
         row = paired_index.loc[variant]
@@ -1314,13 +1379,13 @@ def write_report(
             f"and had {speed}."
         )
 
-    report = f"""# LunarLander Report v0
+    report = f"""# {report_title}
 
 ## Data and Method
 
-This report analyzes the completed `output/lunarlander_v3/` runs. There are {len(summary_df)} runs: six DQN variants with {int(baseline['n'])} seeds each. Every run used a budget of {format_steps(summary_df['total_env_steps'].max())} environment steps, and the success threshold is return >= {format_number(summary_df['success_threshold'].dropna().iloc[0], 0)}. The analysis uses the latest completed run under each variant/seed directory.
+This report analyzes the completed `{output_path}/` runs. There are {len(summary_df)} runs: six DQN variants with {seed_count} seeds each. Every run used a budget of {format_steps(summary_df['total_env_steps'].max())} environment steps, and the success threshold is return >= {format_number(success_threshold, 0)}. The analysis uses the latest completed run under each variant/seed directory.
 
-The statistics below are computed with numpy and pandas from `summary.json`, `eval_metrics.jsonl`, and the update logs. Intervals are 95 percent t-intervals across seeds. With only five seeds, the intervals should be read as uncertainty estimates, not as formal proof.
+The statistics below are computed with numpy and pandas from `summary.json`, `eval_metrics.jsonl`, and the update logs. Intervals are 95 percent t-intervals across seeds. With {seed_count} seeds per variant, the intervals should be read as uncertainty estimates, not as formal proof.
 
 Figures:
 
@@ -1346,11 +1411,11 @@ Paired comparison against baseline:
 
 ## Baseline DQN Performance Study
 
-The baseline DQN solved the task at least once in all {int(baseline['n'])} seeds. Its final mean return was {mean_ci_text(baseline['final_return_mean'], baseline['final_return_ci95'])}, with a large seed standard deviation of {format_number(baseline['final_return_std'], 1)}. Its best mean return was {mean_ci_text(baseline['best_return_mean'], baseline['best_return_ci95'])}, and its median first step reaching the success threshold was {format_steps(baseline['first_reach_step_median'])}.
+The baseline DQN reached the success threshold at least once in {count_text(int(baseline['threshold_reach_count']), int(baseline['n']))}. Its final mean return was {mean_ci_text(baseline['final_return_mean'], baseline['final_return_ci95'])}, with a seed standard deviation of {format_number(baseline['final_return_std'], 1)}. Its best mean return was {mean_ci_text(baseline['best_return_mean'], baseline['best_return_ci95'])}, and its median first step reaching the success threshold was {format_steps(baseline['first_reach_step_median'])}.
 
-The baseline's main strength is early sample efficiency. Its normalized AUC was {mean_ci_text(baseline['normalized_auc_mean'], baseline['normalized_auc_ci95'])}, the highest among these variants. The learning-curve and phase-return figures show that baseline DQN became useful earlier than most extensions.
+The baseline's main strength is early sample efficiency. Its normalized AUC was {mean_ci_text(baseline['normalized_auc_mean'], baseline['normalized_auc_ci95'])}, {baseline_auc_sentence}. The learning-curve and phase-return figures show how quickly baseline DQN became useful compared with the extensions.
 
-The weakness is retention. The average best-final gap was {format_number(baseline['best_final_gap_mean'], 1)}, and the average collapse count was {format_number(baseline['collapse_count_mean'], 1)} per run. Two baseline seeds finished below the success threshold: {', '.join(str(int(seed)) for seed in dqn_bad_seeds['seed'])}. This means the baseline often found a good policy, but the final checkpoint was not always the best policy.
+The weakness is retention. The average best-final gap was {format_number(baseline['best_final_gap_mean'], 1)}, and the average collapse count was {format_number(baseline['collapse_count_mean'], 1)} per run. {len(dqn_bad_seeds)} baseline seeds finished below the success threshold: {seed_list_text(dqn_bad_seeds['seed'])}. This means the baseline often found a good policy, but the final checkpoint was not always the best policy.
 
 ![Sample efficiency and AUC](figures/lunarlander/fig_sample_efficiency_auc.png)
 
@@ -1364,27 +1429,27 @@ The weakness is retention. The average best-final gap was {format_number(baselin
 
 ## Ablation: Removing Replay
 
-{VARIANT_NOTES['dqn_no_replay']} This was the clearest failure. Final mean return was {mean_ci_text(no_replay['final_return_mean'], no_replay['final_return_ci95'])}, and zero out of {int(no_replay['n'])} seeds reached the success threshold. Its normalized AUC was {mean_ci_text(no_replay['normalized_auc_mean'], no_replay['normalized_auc_ci95'])}, far below every replay-based variant.
+{VARIANT_NOTES['dqn_no_replay']} This was the clearest failure. Final mean return was {mean_ci_text(no_replay['final_return_mean'], no_replay['final_return_ci95'])}, and it reached the success threshold in {count_text(int(no_replay['threshold_reach_count']), int(no_replay['n']))}. Its normalized AUC was {mean_ci_text(no_replay['normalized_auc_mean'], no_replay['normalized_auc_ci95'])}, far below every replay-based variant.
 
-{paired_sentence('dqn_no_replay')} The collapse count is {format_number(no_replay['collapse_count_mean'], 1)}, but that is not a sign of stability. The variant never crossed the threshold, so it had no successful regime from which to collapse. The result shows that replay is not just an implementation detail here; it is the core mechanism that gives DQN enough decorrelated and reused experience to learn LunarLander.
+{paired_sentence('dqn_no_replay')} The collapse count is {format_number(no_replay['collapse_count_mean'], 1)}, but that is not a sign of stability by itself. {no_replay_collapse_sentence} The result shows that replay is not just an implementation detail here; it is the core mechanism that gives DQN enough decorrelated and reused experience to learn LunarLander.
 
 ## Extension: Double DQN
 
-{VARIANT_NOTES['double_dqn']} Double DQN produced a final mean return of {mean_ci_text(double['final_return_mean'], double['final_return_ci95'])}, above baseline. It reached the threshold in all seeds and had a final solved count of {int(double['final_solved_count'])}/{int(double['n'])}. Its median first reach step was {format_steps(double['first_reach_step_median'])}, so it was slower to cross the threshold than baseline, but it ended with a better final policy.
+{VARIANT_NOTES['double_dqn']} Double DQN produced a final mean return of {mean_ci_text(double['final_return_mean'], double['final_return_ci95'])}, above baseline. It reached the threshold in {count_text(int(double['threshold_reach_count']), int(double['n']))} and had a final solved count of {int(double['final_solved_count'])}/{int(double['n'])}. Its median first reach step was {format_steps(double['first_reach_step_median'])}, so it was slower to cross the threshold than baseline, but it ended with a better final policy.
 
 {paired_sentence('double_dqn')} The Q-overestimation proxy was {format_number(double['q_overestimation_proxy_last10_mean'], 3)} for Double DQN and {format_number(baseline['q_overestimation_proxy_last10_mean'], 3)} for baseline. This proxy did not decrease, so the performance gain should not be described as proven lower overestimation from this single metric. A safer interpretation is that Double DQN improved final policy quality and reliability even though the logged proxy is sensitive to Q-value scale and late-training state distribution.
 
 ## Extension: Dueling DQN
 
-{VARIANT_NOTES['dueling_dqn']} Dueling DQN had the best final mean return: {mean_ci_text(dueling['final_return_mean'], dueling['final_return_ci95'])}. It solved at the end in {int(dueling['final_solved_count'])}/{int(dueling['n'])} seeds and reached the threshold in all seeds. Its average collapse count was {format_number(dueling['collapse_count_mean'], 1)}, lower than the baseline value of {format_number(baseline['collapse_count_mean'], 1)}.
+{dueling_intro} It solved at the end in {int(dueling['final_solved_count'])}/{int(dueling['n'])} seeds and reached the threshold in {count_text(int(dueling['threshold_reach_count']), int(dueling['n']))}. Its average collapse count was {format_number(dueling['collapse_count_mean'], 1)}, lower than the baseline value of {format_number(baseline['collapse_count_mean'], 1)}.
 
-{paired_sentence('dueling_dqn')} The tradeoff is speed. Its median first reach step was {format_steps(dueling['first_reach_step_median'])}, slower than baseline. The result suggests that separating state value from action advantage helped late policy quality and stability more than early learning speed.
+{paired_sentence('dueling_dqn')} The tradeoff is speed. Its median first reach step was {format_steps(dueling['first_reach_step_median'])}, slower than baseline. {dueling_interpretation}
 
 ## Extension: Double + Dueling DQN
 
-{VARIANT_NOTES['double_dueling_dqn']} The combined variant had final mean return {mean_ci_text(double_dueling['final_return_mean'], double_dueling['final_return_ci95'])}, but with very high seed standard deviation of {format_number(double_dueling['final_return_std'], 1)}. Four seeds finished near or above strong solved performance, while one seed failed badly.
+{VARIANT_NOTES['double_dueling_dqn']} The combined variant had final mean return {mean_ci_text(double_dueling['final_return_mean'], double_dueling['final_return_ci95'])}, with a seed standard deviation of {format_number(double_dueling['final_return_std'], 1)} and a final solved count of {int(double_dueling['final_solved_count'])}/{int(double_dueling['n'])}.
 
-{paired_sentence('double_dueling_dqn')} This means the combination can work very well, but in this result set it is less reliable than using the dueling head alone. The mean hides a bimodal-looking behavior: most seeds are strong, one seed is a clear failure.
+{paired_sentence('double_dueling_dqn')} This means the combination can work very well, but in this result set it is less reliable than using the dueling head alone when its seed spread is larger or its final solved count is lower.
 
 ![Stability and regression diagnostics](figures/lunarlander/fig_stability_regression.png)
 
@@ -1404,19 +1469,19 @@ The behavior figure connects return to LunarLander outcomes. Good variants show 
 
 ## Main Conclusions
 
-Experience replay is essential in this experiment. Removing replay prevented every seed from reaching the success threshold.
+{replay_conclusion}
 
 The target network matters for stability. Removing it did not make learning impossible, but it lowered final performance and increased collapse frequency.
 
-Baseline DQN learned early, which gave it the best normalized AUC, but it often failed to retain its best policy until the final checkpoint.
+{baseline_conclusion}
 
-Dueling DQN was the strongest final performer and had fewer collapses than baseline, suggesting better late-training value representation for LunarLander.
+{final_performance_conclusion}
 
 Double DQN improved final return, but the logged overestimation proxy alone does not prove a clean reduction in overestimation for these runs.
 
-Double + Dueling DQN showed high upside but worse reliability than Dueling DQN alone because one seed failed badly.
+{double_dueling_conclusion}
 """
-    (analysis_dir / "lunarlander_report_v0.md").write_text(report, encoding="utf-8")
+    (analysis_dir / report_name).write_text(report, encoding="utf-8")
 
 
 def main() -> None:
@@ -1436,9 +1501,19 @@ def main() -> None:
     save_tables(tables_dir, summary_df, variant_summary, paired, eval_curve, final_behavior, phase_summary)
     save_figures(figures_dir, summary_df, variant_summary, paired, eval_curve, final_behavior, phase_summary)
     write_metrics_tutorial(analysis_dir)
-    write_report(analysis_dir, summary_df, variant_summary, paired, final_behavior)
+    write_report(
+        analysis_dir,
+        summary_df,
+        variant_summary,
+        paired,
+        final_behavior,
+        args.report_name,
+        args.report_title,
+        output_root,
+        args.env_slug,
+    )
 
-    print(f"Wrote reports to {analysis_dir / 'metrics_tutorials.md'} and {analysis_dir / 'lunarlander_report_v0.md'}")
+    print(f"Wrote reports to {analysis_dir / 'metrics_tutorials.md'} and {analysis_dir / args.report_name}")
     print(f"Wrote figures to {figures_dir}")
     print(f"Wrote tables to {tables_dir}")
 
