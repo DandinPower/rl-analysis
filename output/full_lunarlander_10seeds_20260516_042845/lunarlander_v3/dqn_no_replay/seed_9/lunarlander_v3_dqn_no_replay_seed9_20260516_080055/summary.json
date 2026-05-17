@@ -1,0 +1,77 @@
+{
+  "compute": {
+    "env_steps_per_second": 23.711044017604078,
+    "updates_per_second": 23.711044017604078,
+    "wall_time_total_sec": 21087.21993130201
+  },
+  "env_id": "LunarLander-v3",
+  "failure_diagnostics": {
+    "early_terminated": false,
+    "gradient_explosion": true,
+    "inf_detected": false,
+    "loss_explosion": true,
+    "nan_detected": false,
+    "q_value_explosion": true
+  },
+  "optimization": {
+    "grad_norm_max": 10.000001669791388,
+    "grad_norm_mean_last_10pct": 9.675830622339333,
+    "gradient_clip_fraction": 0.932,
+    "td_error_abs_mean_last_10pct": 2.2166318321228027,
+    "td_error_abs_p95_last_10pct": 2.2166318321228027,
+    "td_loss_mean_last_10pct": 1.839521111404465
+  },
+  "performance": {
+    "area_under_eval_curve": -108543825.40335168,
+    "best_eval_return_mean": 80.61429475000796,
+    "best_eval_step": 110000,
+    "final_eval_return_mean": -364.3290949622034,
+    "final_eval_return_median": -380.7658174193154,
+    "final_eval_return_std": 100.20724626853139,
+    "final_train_return_mean_last_100": -240.64741747152203,
+    "final_train_return_std_last_100": 178.02132720242724,
+    "normalized_area_under_eval_curve": -217.08765080670335
+  },
+  "q_diagnostics": {
+    "max_q_value_seen": 6368.80615234375,
+    "mean_q_overestimation_proxy_last_10pct": -4.268612634658814,
+    "online_q_max_mean_last_10pct": 306.81766719436644,
+    "online_q_mean_last_10pct": 304.2906364212036,
+    "target_q_mean_last_10pct": 311.0862798290253
+  },
+  "replay_diagnostics": {
+    "final_buffer_size": 0,
+    "replay_enabled": false,
+    "sample_age_mean_last_10pct": 0.0,
+    "sample_consecutive_transition_fraction_last_10pct": 1.0
+  },
+  "run_id": "lunarlander_v3_dqn_no_replay_seed9_20260516_080055",
+  "sample_efficiency": {
+    "first_step_reaching_threshold": null,
+    "first_step_sustained_threshold": null,
+    "never_reached_threshold": true,
+    "sustained_threshold_window": 5,
+    "threshold": 200.0
+  },
+  "seed": 9,
+  "stability": {
+    "catastrophic_collapse_count": 0,
+    "collapse_definition": "eval return mean drops by >= 30% from previous best after crossing threshold",
+    "eval_return_std_across_time": 362.91367193551645,
+    "largest_eval_drop": 0.0,
+    "largest_eval_drop_fraction": 0.0,
+    "rolling_return_std_max": 1052.6106443752099,
+    "rolling_return_std_mean": 178.02132720242724
+  },
+  "target_network_diagnostics": {
+    "online_target_param_l2_max": 2.035644715918592,
+    "online_target_param_l2_mean": 0.6309858232727698,
+    "target_network_enabled": true,
+    "target_update_count": 501
+  },
+  "total_env_steps": 500000,
+  "total_episodes": 2331,
+  "total_updates": 500000,
+  "training_completed": true,
+  "variant": "dqn_no_replay"
+}

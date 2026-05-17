@@ -1,0 +1,58 @@
+{
+  "area_under_eval_curve": {
+    "max": 69243558.89712602,
+    "mean": 33116083.694179732,
+    "median": 28668619.091436297,
+    "min": -1088041.4510061848,
+    "std": 21084633.11224725
+  },
+  "best_eval_return": {
+    "max": 278.1925401636019,
+    "mean": 268.32657960368545,
+    "median": 271.8628922057443,
+    "min": 243.009450770137,
+    "std": 10.098764739939496
+  },
+  "env_id": "LunarLander-v3",
+  "failure_rate": {
+    "early_termination_rate": 0.0,
+    "nan_rate": 0.0,
+    "q_value_explosion_rate": 0.4
+  },
+  "final_eval_return": {
+    "max": 268.90336867248084,
+    "mean": 205.48970843692564,
+    "median": 226.56246390084664,
+    "min": 41.7773827996362,
+    "std": 68.39125743814371
+  },
+  "num_seeds": 10,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "stability": {
+    "catastrophic_collapse_count_mean": 9.7,
+    "eval_return_across_seed_std_mean": 68.39125743814371,
+    "largest_eval_drop_mean": 261.43495817938395
+  },
+  "steps_to_threshold": {
+    "max": 440000.0,
+    "mean": 255000.0,
+    "median": 240000.0,
+    "min": 140000.0,
+    "num_seeds_reached": 10,
+    "std": 92330.92656309695,
+    "success_rate": 1.0,
+    "threshold": 200.0
+  },
+  "variant": "dueling_dqn"
+}
