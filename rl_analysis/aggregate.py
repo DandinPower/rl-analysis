@@ -122,8 +122,38 @@ def aggregate_variant(env_slug: str, variant: str, output_root: Path) -> dict[st
             ),
         },
     }
+    if summaries[0]["env_id"] == "ALE/Freeway-v5":
+        aggregate["freeway"] = _aggregate_freeway(summaries)
     write_json(variant_dir / "aggregate_summary.json", aggregate)
     return aggregate
+
+
+def _aggregate_freeway(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    final_zero_score_rates = [
+        summary.get("freeway", {}).get("final_zero_score_rate")
+        for summary in summaries
+        if summary.get("freeway", {}).get("final_zero_score_rate") is not None
+    ]
+    thresholds = summaries[0].get("freeway", {}).get("score_thresholds", [])
+    threshold_success_rates = {}
+    threshold_first_steps = {}
+    for threshold in thresholds:
+        key = str(threshold)
+        reached = [
+            summary.get("freeway", {}).get("first_step_reaching_score_thresholds", {}).get(key)
+            for summary in summaries
+        ]
+        reached_steps = [float(step) for step in reached if step is not None]
+        threshold_success_rates[key] = float(len(reached_steps) / len(summaries))
+        threshold_first_steps[key] = _stats(reached_steps)
+    return {
+        "final_zero_score_rate": _stats([float(value) for value in final_zero_score_rates]),
+        "score_threshold_success_rates": threshold_success_rates,
+        "score_threshold_first_steps": threshold_first_steps,
+        "reference_random_score": summaries[0].get("freeway", {}).get("reference_random_score"),
+        "reference_human_score": summaries[0].get("freeway", {}).get("reference_human_score"),
+        "reference_dqn_score": summaries[0].get("freeway", {}).get("reference_dqn_score"),
+    }
 
 
 def plot_learning_curves(env_slug: str, output_root: Path) -> None:
@@ -148,7 +178,7 @@ def plot_learning_curves(env_slug: str, output_root: Path) -> None:
     if plotted_any:
         plt.xlabel("Environment steps")
         plt.ylabel("Mean evaluation return")
-        plt.title("LunarLander-v3 DQN ablations")
+        plt.title(f"{env_slug} DQN ablations")
         plt.legend()
         plt.tight_layout()
         plt.savefig(plot_dir / "eval_learning_curves.png", dpi=160)

@@ -6,7 +6,7 @@ scikit-learn
 numpy
 pytest
 gymnasium[box2d]
-
-# Future Atari Freeway support will need ALE and image preprocessing packages.
-# Install these later when Freeway experiments are added:
-# ale-py
+gymnasium[atari]
+gymnasium[other]
+ale-py
+opencv-python

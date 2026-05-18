@@ -12,7 +12,7 @@ import torch
 
 from rl_analysis.agent import DQNAgent
 from rl_analysis.config import RunConfig
-from rl_analysis.envs import environment_config_dict, lunarlander_episode_metrics, make_env
+from rl_analysis.envs import environment_config_dict, freeway_episode_metrics, lunarlander_episode_metrics, make_env
 from rl_analysis.logging_utils import RunLoggers, collect_system_metrics, write_run_config
 from rl_analysis.networks import build_q_network, network_architecture_dict
 from rl_analysis.replay import ReplayBuffer, Transition, replay_diagnostics, transition_to_batch
@@ -46,6 +46,7 @@ class DQNTrainer:
         self.eval_env = make_env(config.env, seed=config.seed + 1_000)
         observation_shape = tuple(int(x) for x in self.env.observation_space.shape)
         action_dim = int(self.env.action_space.n)
+        self.observation_storage_dtype = np.uint8 if config.env.observation_type == "image" else np.float32
 
         online_network = build_q_network(observation_shape, action_dim, config.network)
         target_network = (
@@ -62,7 +63,13 @@ class DQNTrainer:
             device=self.device,
         )
         self.replay_buffer = (
-            ReplayBuffer(config.dqn.replay_buffer_size, observation_shape) if config.variant.use_replay_buffer else None
+            ReplayBuffer(
+                config.dqn.replay_buffer_size,
+                observation_shape,
+                observation_dtype=self.observation_storage_dtype,
+            )
+            if config.variant.use_replay_buffer
+            else None
         )
         self.run_dir = config.run_dir
         self.checkpoint_dir = self.run_dir / "checkpoints"
@@ -70,6 +77,7 @@ class DQNTrainer:
         self.episode_lengths: list[int] = []
         self.eval_records: list[dict[str, Any]] = []
         self.update_records: list[dict[str, Any]] = []
+        self.max_score_so_far = 0.0
         self.failure_flags = {
             "nan_detected": False,
             "inf_detected": False,
@@ -115,10 +123,10 @@ class DQNTrainer:
                 episode_action_counts[action] += 1
 
                 transition = Transition(
-                    state=np.asarray(obs, dtype=np.float32),
+                    state=np.asarray(obs, dtype=self.observation_storage_dtype),
                     action=action,
                     reward=float(reward),
-                    next_state=np.asarray(next_obs, dtype=np.float32),
+                    next_state=np.asarray(next_obs, dtype=self.observation_storage_dtype),
                     terminated=bool(terminated),
                     truncated=bool(truncated),
                     global_step=global_step,
@@ -147,11 +155,13 @@ class DQNTrainer:
                     episode_wall_time = time.perf_counter() - episode_start
                     self.episode_returns.append(float(episode_return))
                     self.episode_lengths.append(int(episode_length))
-                    game_specific = lunarlander_episode_metrics(
+                    if self.config.env.env_id == "ALE/Freeway-v5":
+                        self.max_score_so_far = max(self.max_score_so_far, float(episode_return))
+                    game_specific = self._episode_game_metrics(
                         episode_return=episode_return,
                         episode_length=episode_length,
                         action_counts=episode_action_counts,
-                        final_observation=np.asarray(next_obs, dtype=np.float32),
+                        final_observation=np.asarray(next_obs, dtype=self.observation_storage_dtype),
                         terminated=bool(terminated),
                         truncated=bool(truncated),
                     )
@@ -230,6 +240,32 @@ class DQNTrainer:
         self.eval_env.close()
         return summary
 
+    def _episode_game_metrics(
+        self,
+        *,
+        episode_return: float,
+        episode_length: int,
+        action_counts: np.ndarray,
+        final_observation: np.ndarray,
+        terminated: bool,
+        truncated: bool,
+    ) -> dict[str, Any]:
+        if self.config.env.env_id == "ALE/Freeway-v5":
+            return freeway_episode_metrics(
+                episode_return=episode_return,
+                episode_length=episode_length,
+                action_counts=action_counts,
+                max_score_so_far=self.max_score_so_far,
+            )
+        return lunarlander_episode_metrics(
+            episode_return=episode_return,
+            episode_length=episode_length,
+            action_counts=action_counts,
+            final_observation=np.asarray(final_observation, dtype=np.float32),
+            terminated=terminated,
+            truncated=truncated,
+        )
+
     def _should_update(self, global_step: int) -> bool:
         if global_step < self.config.dqn.learning_starts:
             return False
@@ -272,13 +308,7 @@ class DQNTrainer:
         lengths = []
         entropies = []
         action_counts_rows = []
-        landing_successes = []
-        crashes = []
-        timeouts = []
-        both_legs = []
-        one_leg = []
-        main_frac = []
-        side_frac = []
+        game_metric_rows = []
 
         for episode in range(self.config.training.num_eval_episodes):
             obs, _ = self.eval_env.reset(seed=self.config.seed + 100_000 + eval_index * 1_000 + episode)
@@ -298,11 +328,11 @@ class DQNTrainer:
                 episode_length += 1
                 action_counts[action] += 1
 
-            metrics = lunarlander_episode_metrics(
+            metrics = self._eval_episode_game_metrics(
                 episode_return=episode_return,
                 episode_length=episode_length,
                 action_counts=action_counts,
-                final_observation=np.asarray(final_obs, dtype=np.float32),
+                final_observation=np.asarray(final_obs, dtype=self.observation_storage_dtype),
                 terminated=bool(terminated),
                 truncated=bool(truncated),
             )
@@ -310,13 +340,7 @@ class DQNTrainer:
             lengths.append(float(episode_length))
             entropies.append(action_entropy(action_counts))
             action_counts_rows.append(action_counts)
-            landing_successes.append(float(metrics["landing_success"]))
-            crashes.append(float(metrics["crash"]))
-            timeouts.append(float(metrics["timeout"]))
-            both_legs.append(float(metrics["both_legs_contact"]))
-            one_leg.append(float(metrics["one_leg_contact"]))
-            main_frac.append(float(metrics["main_engine_action_fraction"]))
-            side_frac.append(float(metrics["side_engine_action_fraction"]))
+            game_metric_rows.append(metrics)
 
         return_stats = numeric_stats(returns)
         length_stats = numeric_stats(lengths)
@@ -329,7 +353,7 @@ class DQNTrainer:
             best_eval_step = best_so_far["global_env_step"]
 
         action_counts_mean = np.mean(np.stack(action_counts_rows, axis=0), axis=0)
-        return {
+        payload = {
             "run_id": self.config.run_id,
             "env_id": self.config.env.env_id,
             "variant": self.config.variant.name,
@@ -352,18 +376,78 @@ class DQNTrainer:
             "action_entropy_mean": float(np.mean(entropies)),
             "action_entropy_std": float(np.std(entropies)),
             "action_counts_mean": action_counts_mean.tolist(),
-            "lunarlander_eval": {
-                "success_rate": float(np.mean([1.0 if r >= 200.0 else 0.0 for r in returns])),
-                "success_definition": "return >= 200",
-                "landing_success_rate": float(np.mean(landing_successes)),
-                "crash_rate": float(np.mean(crashes)),
-                "timeout_rate": float(np.mean(timeouts)),
-                "main_engine_action_fraction_mean": float(np.mean(main_frac)),
-                "side_engine_action_fraction_mean": float(np.mean(side_frac)),
-                "both_legs_contact_rate": float(np.mean(both_legs)),
-                "one_leg_contact_rate": float(np.mean(one_leg)),
-                "no_leg_contact_rate": float(1.0 - np.mean(both_legs) - np.mean(one_leg)),
-            },
+        }
+        if self.config.env.env_id == "ALE/Freeway-v5":
+            payload["freeway_eval"] = self._freeway_eval_summary(returns, game_metric_rows)
+        else:
+            payload["lunarlander_eval"] = self._lunarlander_eval_summary(returns, game_metric_rows)
+        return payload
+
+    def _eval_episode_game_metrics(
+        self,
+        *,
+        episode_return: float,
+        episode_length: int,
+        action_counts: np.ndarray,
+        final_observation: np.ndarray,
+        terminated: bool,
+        truncated: bool,
+    ) -> dict[str, Any]:
+        if self.config.env.env_id == "ALE/Freeway-v5":
+            return freeway_episode_metrics(
+                episode_return=episode_return,
+                episode_length=episode_length,
+                action_counts=action_counts,
+                max_score_so_far=max(self.max_score_so_far, float(episode_return)),
+            )
+        return lunarlander_episode_metrics(
+            episode_return=episode_return,
+            episode_length=episode_length,
+            action_counts=action_counts,
+            final_observation=np.asarray(final_observation, dtype=np.float32),
+            terminated=terminated,
+            truncated=truncated,
+        )
+
+    def _lunarlander_eval_summary(
+        self, returns: list[float], metric_rows: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        both_legs = [float(row["both_legs_contact"]) for row in metric_rows]
+        one_leg = [float(row["one_leg_contact"]) for row in metric_rows]
+        return {
+            "success_rate": float(np.mean([1.0 if r >= 200.0 else 0.0 for r in returns])),
+            "success_definition": "return >= 200",
+            "landing_success_rate": float(np.mean([row["landing_success"] for row in metric_rows])),
+            "crash_rate": float(np.mean([row["crash"] for row in metric_rows])),
+            "timeout_rate": float(np.mean([row["timeout"] for row in metric_rows])),
+            "main_engine_action_fraction_mean": float(
+                np.mean([row["main_engine_action_fraction"] for row in metric_rows])
+            ),
+            "side_engine_action_fraction_mean": float(
+                np.mean([row["side_engine_action_fraction"] for row in metric_rows])
+            ),
+            "both_legs_contact_rate": float(np.mean(both_legs)),
+            "one_leg_contact_rate": float(np.mean(one_leg)),
+            "no_leg_contact_rate": float(1.0 - np.mean(both_legs) - np.mean(one_leg)),
+        }
+
+    def _freeway_eval_summary(self, returns: list[float], metric_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        score_stats = numeric_stats(returns)
+        threshold_rates = {
+            str(threshold): float(np.mean([1.0 if score >= threshold else 0.0 for score in returns]))
+            for threshold in self.config.env.score_thresholds
+        }
+        return {
+            "score_mean": score_stats["mean"],
+            "score_std": score_stats["std"],
+            "score_median": score_stats["median"],
+            "score_min": score_stats["min"],
+            "score_max": score_stats["max"],
+            "zero_score_rate": float(np.mean([row["zero_score_episode"] for row in metric_rows])),
+            "action_up_fraction_mean": float(np.mean([row["action_up_fraction"] for row in metric_rows])),
+            "action_down_fraction_mean": float(np.mean([row["action_down_fraction"] for row in metric_rows])),
+            "action_noop_fraction_mean": float(np.mean([row["action_noop_fraction"] for row in metric_rows])),
+            "score_threshold_success_rates": threshold_rates,
         }
 
     def save_checkpoint(self, global_step: int, latest_eval: dict[str, Any] | None) -> dict[str, Any]:
@@ -430,6 +514,7 @@ class DQNTrainer:
             "seed": self.config.seed,
             "training_completed": True,
             "total_env_steps": global_step,
+            "total_ale_frames": self._estimated_ale_frames(global_step),
             "total_episodes": len(self.episode_returns),
             "total_updates": total_updates,
             "performance": {
@@ -470,8 +555,49 @@ class DQNTrainer:
                 "env_steps_per_second": global_step / wall_time_total if wall_time_total > 0 else None,
                 "updates_per_second": total_updates / wall_time_total if wall_time_total > 0 else None,
             },
+            **(
+                {"freeway": self._freeway_summary(eval_returns, eval_steps, final_eval)}
+                if self.config.env.env_id == "ALE/Freeway-v5"
+                else {}
+            ),
             "failure_diagnostics": dict(self.failure_flags),
         }
+
+    def _estimated_ale_frames(self, env_steps: int) -> int | None:
+        if self.config.env.frame_skip is None:
+            return None
+        return int(env_steps * self.config.env.frame_skip)
+
+    def _freeway_summary(
+        self,
+        eval_returns: list[float],
+        eval_steps: list[int],
+        final_eval: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        threshold_steps = self._first_steps_for_thresholds(eval_returns, eval_steps, self.config.env.score_thresholds)
+        final_freeway = final_eval.get("freeway_eval", {}) if final_eval else {}
+        return {
+            "final_eval_score_mean": final_eval.get("return_mean") if final_eval else None,
+            "best_eval_score_mean": max(eval_returns) if eval_returns else None,
+            "final_zero_score_rate": final_freeway.get("zero_score_rate"),
+            "score_thresholds": list(self.config.env.score_thresholds),
+            "first_step_reaching_score_thresholds": threshold_steps,
+            "reference_random_score": self.config.env.reference_random_score,
+            "reference_human_score": self.config.env.reference_human_score,
+            "reference_dqn_score": self.config.env.reference_dqn_score,
+        }
+
+    def _first_steps_for_thresholds(
+        self, eval_returns: list[float], eval_steps: list[int], thresholds: tuple[float, ...]
+    ) -> dict[str, int | None]:
+        first_steps: dict[str, int | None] = {}
+        for threshold in thresholds:
+            first_steps[str(threshold)] = None
+            for value, step in zip(eval_returns, eval_steps, strict=False):
+                if value >= threshold:
+                    first_steps[str(threshold)] = step
+                    break
+        return first_steps
 
     def _first_threshold_step(self, eval_returns: list[float], eval_steps: list[int]) -> int | None:
         threshold = self.config.env.success_threshold
@@ -621,7 +747,7 @@ class DQNTrainer:
             "use_dueling_network": self.config.variant.use_dueling_network,
             "use_prioritized_replay": False,
             "use_noisy_network": False,
-            "use_reward_clipping": self.config.variant.use_reward_clipping,
+            "use_reward_clipping": self.config.variant.use_reward_clipping or self.config.env.reward_clipping,
         }
         payload = {
             "run_id": self.config.run_id,
@@ -641,6 +767,8 @@ class DQNTrainer:
                 "num_seeds": self.config.training.num_seeds,
                 "eval_frequency_env_steps": self.config.training.eval_frequency_env_steps,
                 "checkpoint_frequency_env_steps": self.config.training.checkpoint_frequency_env_steps,
+                "agent_step_to_ale_frame_multiplier": self.config.env.frame_skip,
+                "estimated_total_ale_frames": self._estimated_ale_frames(self.config.training.total_env_steps),
             },
             "environment": environment_config_dict(self.config.env),
             "network": network_architecture_dict(self.config.network, self.config.network.num_parameters or 0),

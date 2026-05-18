@@ -88,6 +88,9 @@ class EnvironmentProfile:
     network_architecture: str
     success_threshold: float | None
     reward_clipping: bool = False
+    raw_frame_skip: int | None = None
+    repeat_action_probability: float | None = None
+    full_action_space: bool | None = None
     frame_skip: int | None = None
     frame_stack: int | None = None
     grayscale: bool | None = None
@@ -95,6 +98,10 @@ class EnvironmentProfile:
     noop_max: int | None = None
     terminal_on_life_loss: bool | None = None
     max_episode_steps: int | None = None
+    score_thresholds: tuple[float, ...] = ()
+    reference_random_score: float | None = None
+    reference_human_score: float | None = None
+    reference_dqn_score: float | None = None
 
 
 ENV_PROFILES: dict[str, EnvironmentProfile] = {
@@ -113,14 +120,21 @@ ENV_PROFILES: dict[str, EnvironmentProfile] = {
         observation_type="image",
         action_space_type="discrete",
         network_architecture="cnn",
-        success_threshold=None,
+        success_threshold=15.0,
         reward_clipping=True,
+        raw_frame_skip=1,
+        repeat_action_probability=0.25,
+        full_action_space=False,
         frame_skip=4,
         frame_stack=4,
         grayscale=True,
         resize_shape=(84, 84),
         noop_max=30,
         terminal_on_life_loss=False,
+        score_thresholds=(5.0, 10.0, 15.0, 22.5),
+        reference_random_score=0.0,
+        reference_human_score=29.6,
+        reference_dqn_score=30.3,
     ),
 }
 
@@ -239,8 +253,23 @@ def get_env_profile(env_id: str) -> EnvironmentProfile:
     return ENV_PROFILES[canonical]
 
 
-def default_dqn_for_variant(variant: VariantSpec) -> DQNHyperparameters:
+def default_training_for_env(env: EnvironmentProfile) -> TrainingConfig:
+    if env.env_id == "ALE/Freeway-v5":
+        return TrainingConfig(total_env_steps=1_000_000)
+    return TrainingConfig()
+
+
+def default_dqn_for_variant(variant: VariantSpec, env: EnvironmentProfile | None = None) -> DQNHyperparameters:
     dqn = DQNHyperparameters()
+    if env is not None and env.env_id == "ALE/Freeway-v5":
+        dqn = replace(
+            dqn,
+            batch_size=32,
+            replay_buffer_size=25_000,
+            learning_starts=20_000,
+            train_frequency_env_steps=4,
+            target_update_frequency_env_steps=8_000,
+        )
     if not variant.use_replay_buffer:
         dqn = replace(
             dqn,
@@ -251,6 +280,18 @@ def default_dqn_for_variant(variant: VariantSpec) -> DQNHyperparameters:
             gradient_steps_per_train=1,
         )
     return dqn
+
+
+def default_exploration_for_env(env: EnvironmentProfile) -> ExplorationConfig:
+    if env.env_id == "ALE/Freeway-v5":
+        return ExplorationConfig(epsilon_final=0.01, epsilon_decay_env_steps=250_000)
+    return ExplorationConfig()
+
+
+def default_optimizer_for_env(env: EnvironmentProfile) -> OptimizerConfig:
+    if env.env_id == "ALE/Freeway-v5":
+        return OptimizerConfig(learning_rate=6.25e-5, epsilon=1.5e-4)
+    return OptimizerConfig()
 
 
 def default_network_for_env(env: EnvironmentProfile, variant: VariantSpec) -> NetworkConfig:
@@ -286,11 +327,11 @@ def build_run_config(
     resolved_run_id = run_id or f"{env.slug}_{variant.name}_seed{seed}_{_utc_timestamp()}"
     run_dir = output_root_path / env.slug / variant.name / f"seed_{seed}" / resolved_run_id
 
-    training = TrainingConfig()
-    dqn = default_dqn_for_variant(variant)
-    exploration = ExplorationConfig()
+    training = default_training_for_env(env)
+    dqn = default_dqn_for_variant(variant, env)
+    exploration = default_exploration_for_env(env)
     network = default_network_for_env(env, variant)
-    optimizer = OptimizerConfig()
+    optimizer = default_optimizer_for_env(env)
 
     if training_overrides:
         training = replace(training, **training_overrides)

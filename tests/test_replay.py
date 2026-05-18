@@ -27,6 +27,25 @@ def test_replay_buffer_samples_expected_shapes():
     assert len(buffer) == 6
 
 
+def test_replay_buffer_preserves_uint8_image_storage():
+    buffer = ReplayBuffer(capacity=3, observation_shape=(4, 84, 84), observation_dtype=np.uint8)
+    transition = Transition(
+        state=np.ones((4, 84, 84), dtype=np.uint8) * 255,
+        action=1,
+        reward=1.0,
+        next_state=np.zeros((4, 84, 84), dtype=np.uint8),
+        terminated=False,
+        truncated=False,
+        global_step=1,
+        episode_index=0,
+    )
+    buffer.add(transition)
+    batch = buffer.sample(1, np.random.default_rng(0))
+    assert buffer.states.dtype == np.uint8
+    assert batch.states.dtype == np.uint8
+    assert batch.states.shape == (1, 4, 84, 84)
+
+
 def test_no_replay_transition_batch_is_single_online_sample():
     batch = transition_to_batch(make_transition(7))
     assert batch.states.shape == (1, 2)

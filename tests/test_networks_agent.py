@@ -21,6 +21,20 @@ def test_dueling_q_network_outputs_stream_metrics():
     assert streams["advantage"].shape == (3, 4)
 
 
+def test_cnn_q_network_output_shape():
+    network = build_q_network((4, 84, 84), 3, NetworkConfig(architecture="cnn", dueling_aggregation=None))
+    output = network(torch.zeros(2, 4, 84, 84, dtype=torch.uint8))
+    assert output.shape == (2, 3)
+
+
+def test_dueling_cnn_q_network_outputs_stream_metrics():
+    network = build_q_network((4, 84, 84), 3, NetworkConfig(architecture="cnn", dueling_aggregation="mean_subtraction"))
+    q_values, streams = network(torch.zeros(2, 4, 84, 84, dtype=torch.uint8), return_streams=True)
+    assert q_values.shape == (2, 3)
+    assert streams["value"].shape == (2, 1)
+    assert streams["advantage"].shape == (2, 3)
+
+
 class FixedQ(nn.Module):
     def __init__(self, rows):
         super().__init__()

@@ -22,11 +22,27 @@ def test_lunarlander_config_defaults_to_reference_budget(tmp_path):
     assert config.run_dir.parts[-3:] == ("dqn", "seed_0", config.run_id)
 
 
-def test_freeway_profile_is_available_as_future_stub():
+def test_freeway_profile_has_atari_runtime_defaults(tmp_path):
     profile = get_env_profile("freeway")
     assert profile.env_id == "ALE/Freeway-v5"
     assert profile.network_architecture == "cnn"
     assert profile.frame_stack == 4
+    assert profile.raw_frame_skip == 1
+    assert profile.repeat_action_probability == 0.25
+    assert not profile.full_action_space
+    assert profile.success_threshold == 15.0
+    assert profile.score_thresholds == (5.0, 10.0, 15.0, 22.5)
+
+    config = build_run_config(env_id="freeway", variant_name="dqn", seed=0, output_root=tmp_path)
+    assert config.training.total_env_steps == 1_000_000
+    assert config.dqn.batch_size == 32
+    assert config.dqn.replay_buffer_size == 25_000
+    assert config.dqn.learning_starts == 20_000
+    assert config.dqn.target_update_frequency_env_steps == 8_000
+    assert config.exploration.epsilon_final == 0.01
+    assert config.exploration.epsilon_decay_env_steps == 250_000
+    assert config.optimizer.learning_rate == 6.25e-5
+    assert config.optimizer.epsilon == 1.5e-4
 
 
 def test_no_replay_variant_overrides_replay_hyperparameters(tmp_path):

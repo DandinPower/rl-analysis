@@ -50,13 +50,19 @@ def transition_to_batch(transition: Transition) -> TransitionBatch:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, observation_shape: tuple[int, ...]):
+    def __init__(
+        self,
+        capacity: int,
+        observation_shape: tuple[int, ...],
+        observation_dtype: np.dtype | type | str = np.float32,
+    ):
         if capacity <= 0:
             raise ValueError("ReplayBuffer capacity must be positive.")
         self.capacity = int(capacity)
         self.observation_shape = tuple(observation_shape)
-        self.states = np.zeros((self.capacity, *self.observation_shape), dtype=np.float32)
-        self.next_states = np.zeros((self.capacity, *self.observation_shape), dtype=np.float32)
+        self.observation_dtype = np.dtype(observation_dtype)
+        self.states = np.zeros((self.capacity, *self.observation_shape), dtype=self.observation_dtype)
+        self.next_states = np.zeros((self.capacity, *self.observation_shape), dtype=self.observation_dtype)
         self.actions = np.zeros(self.capacity, dtype=np.int64)
         self.rewards = np.zeros(self.capacity, dtype=np.float32)
         self.terminated = np.zeros(self.capacity, dtype=np.bool_)
@@ -71,8 +77,8 @@ class ReplayBuffer:
 
     def add(self, transition: Transition) -> None:
         idx = self._pos
-        self.states[idx] = np.asarray(transition.state, dtype=np.float32)
-        self.next_states[idx] = np.asarray(transition.next_state, dtype=np.float32)
+        self.states[idx] = np.asarray(transition.state, dtype=self.observation_dtype)
+        self.next_states[idx] = np.asarray(transition.next_state, dtype=self.observation_dtype)
         self.actions[idx] = transition.action
         self.rewards[idx] = transition.reward
         self.terminated[idx] = transition.terminated
