@@ -1,0 +1,98 @@
+{
+  "compute": {
+    "env_steps_per_second": 30.339182582837644,
+    "updates_per_second": 30.339182582837644,
+    "wall_time_total_sec": 32960.677080525
+  },
+  "env_id": "ALE/Freeway-v5",
+  "failure_diagnostics": {
+    "early_terminated": false,
+    "gradient_explosion": false,
+    "inf_detected": false,
+    "loss_explosion": false,
+    "nan_detected": false,
+    "q_value_explosion": false
+  },
+  "freeway": {
+    "best_eval_score_mean": 22.35,
+    "final_eval_score_mean": 0.0,
+    "final_zero_score_rate": 1.0,
+    "first_step_reaching_score_thresholds": {
+      "10.0": 40000,
+      "15.0": 40000,
+      "22.5": null,
+      "5.0": 40000
+    },
+    "reference_dqn_score": 30.3,
+    "reference_human_score": 29.6,
+    "reference_random_score": 0.0,
+    "score_thresholds": [
+      5.0,
+      10.0,
+      15.0,
+      22.5
+    ]
+  },
+  "optimization": {
+    "grad_norm_max": 0.08119967474851833,
+    "grad_norm_mean_last_10pct": 0.014799796054372958,
+    "gradient_clip_fraction": 0.0,
+    "td_error_abs_mean_last_10pct": 0.007830225192010402,
+    "td_error_abs_p95_last_10pct": 0.007830225192010402,
+    "td_loss_mean_last_10pct": 5.055736949388345e-05
+  },
+  "performance": {
+    "area_under_eval_curve": 1269250.0,
+    "best_eval_return_mean": 22.35,
+    "best_eval_step": 70000,
+    "final_eval_return_mean": 0.0,
+    "final_eval_return_median": 0.0,
+    "final_eval_return_std": 0.0,
+    "final_train_return_mean_last_100": 0.01,
+    "final_train_return_std_last_100": 0.09949874371066199,
+    "normalized_area_under_eval_curve": 1.26925
+  },
+  "q_diagnostics": {
+    "max_q_value_seen": 1.9477734565734863,
+    "mean_q_overestimation_proxy_last_10pct": -0.004109190545976162,
+    "online_q_max_mean_last_10pct": 0.4209083449691534,
+    "online_q_mean_last_10pct": 0.4048347250968218,
+    "target_q_mean_last_10pct": 0.42501753551512955
+  },
+  "replay_diagnostics": {
+    "final_buffer_size": 0,
+    "replay_enabled": false,
+    "sample_age_mean_last_10pct": 0.0,
+    "sample_consecutive_transition_fraction_last_10pct": 1.0
+  },
+  "run_id": "freeway_dqn_no_replay_seed4_20260517_023234",
+  "sample_efficiency": {
+    "first_step_reaching_threshold": 40000,
+    "first_step_sustained_threshold": null,
+    "never_reached_threshold": false,
+    "sustained_threshold_window": 5,
+    "threshold": 15.0
+  },
+  "seed": 4,
+  "stability": {
+    "catastrophic_collapse_count": 94,
+    "collapse_definition": "eval return mean drops by >= 30% from previous best after crossing threshold",
+    "eval_return_std_across_time": 3.6774799795512134,
+    "largest_eval_drop": 22.35,
+    "largest_eval_drop_fraction": 1.0,
+    "rolling_return_std_max": 1.7797471730557686,
+    "rolling_return_std_mean": 0.09949874371066199
+  },
+  "target_network_diagnostics": {
+    "online_target_param_l2_max": 0.40043847517611836,
+    "online_target_param_l2_mean": 0.21345726345783472,
+    "target_network_enabled": true,
+    "target_update_count": 126
+  },
+  "total_ale_frames": 4000000,
+  "total_env_steps": 1000000,
+  "total_episodes": 489,
+  "total_updates": 1000000,
+  "training_completed": true,
+  "variant": "dqn_no_replay"
+}

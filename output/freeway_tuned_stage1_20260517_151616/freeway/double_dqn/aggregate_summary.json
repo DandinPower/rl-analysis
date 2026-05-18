@@ -1,0 +1,101 @@
+{
+  "area_under_eval_curve": {
+    "max": 5265000.0,
+    "mean": 2794000.0,
+    "median": 3260000.0,
+    "min": 0.0,
+    "std": 1917721.0433219948
+  },
+  "best_eval_return": {
+    "max": 22.0,
+    "mean": 14.959999999999999,
+    "median": 21.0,
+    "min": 0.0,
+    "std": 8.57661938061845
+  },
+  "env_id": "ALE/Freeway-v5",
+  "failure_rate": {
+    "early_termination_rate": 0.0,
+    "nan_rate": 0.0,
+    "q_value_explosion_rate": 0.0
+  },
+  "final_eval_return": {
+    "max": 7.8,
+    "mean": 2.0,
+    "median": 0.8,
+    "min": 0.0,
+    "std": 2.947541348310486
+  },
+  "freeway": {
+    "final_zero_score_rate": {
+      "max": 1.0,
+      "mean": 0.5599999999999999,
+      "median": 0.4,
+      "min": 0.0,
+      "std": 0.3878143885933063
+    },
+    "reference_dqn_score": 30.3,
+    "reference_human_score": 29.6,
+    "reference_random_score": 0.0,
+    "score_threshold_first_steps": {
+      "10.0": {
+        "max": 350000.0,
+        "mean": 150000.0,
+        "median": 100000.0,
+        "min": 50000.0,
+        "std": 117260.39399558573
+      },
+      "15.0": {
+        "max": 100000.0,
+        "mean": 83333.33333333333,
+        "median": 100000.0,
+        "min": 50000.0,
+        "std": 23570.22603955158
+      },
+      "22.5": {
+        "max": null,
+        "mean": null,
+        "median": null,
+        "min": null,
+        "std": null
+      },
+      "5.0": {
+        "max": 300000.0,
+        "mean": 137500.0,
+        "median": 100000.0,
+        "min": 50000.0,
+        "std": 96014.3218483576
+      }
+    },
+    "score_threshold_success_rates": {
+      "10.0": 0.8,
+      "15.0": 0.6,
+      "22.5": 0.0,
+      "5.0": 0.8
+    }
+  },
+  "num_seeds": 5,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "stability": {
+    "catastrophic_collapse_count_mean": 9.8,
+    "eval_return_across_seed_std_mean": 2.947541348310486,
+    "largest_eval_drop_mean": 12.84
+  },
+  "steps_to_threshold": {
+    "max": 100000.0,
+    "mean": 83333.33333333333,
+    "median": 100000.0,
+    "min": 50000.0,
+    "num_seeds_reached": 3,
+    "std": 23570.22603955158,
+    "success_rate": 0.6,
+    "threshold": 15.0
+  },
+  "variant": "double_dqn"
+}
