@@ -1,10 +1,11 @@
-torch
-torchvision
+torch>=2.11
+torchvision>=0.26
 tqdm
 matplotlib
 scikit-learn
 numpy
 pytest
+psutil
 gymnasium[box2d]
 gymnasium[atari]
 gymnasium[other]

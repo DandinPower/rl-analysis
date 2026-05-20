@@ -60,10 +60,23 @@ def write_run_config(run_dir: Path, payload: dict[str, Any]) -> None:
     write_json(run_dir / "run_config.json", payload)
 
 
+def _mps_memory_gb(name: str) -> float | None:
+    if not hasattr(torch, "mps"):
+        return None
+    reader = getattr(torch.mps, name, None)
+    if reader is None:
+        return None
+    try:
+        return float(reader() / 1024**3)
+    except Exception:
+        return None
+
+
 def collect_system_metrics(
     *,
     run_id: str,
     global_env_step: int,
+    device: torch.device,
     wall_time_start: float,
     env_steps_per_second: float | None,
     updates_per_second: float | None,
@@ -81,12 +94,21 @@ def collect_system_metrics(
 
     gpu_util_percent = None
     gpu_memory_used_gb = None
-    if torch.cuda.is_available():
+    mps_memory_allocated_gb = None
+    mps_driver_allocated_gb = None
+    mps_recommended_max_memory_gb = None
+    if device.type == "cuda" and torch.cuda.is_available():
         gpu_memory_used_gb = float(torch.cuda.memory_allocated() / 1024**3)
+    elif device.type == "mps":
+        mps_memory_allocated_gb = _mps_memory_gb("current_allocated_memory")
+        mps_driver_allocated_gb = _mps_memory_gb("driver_allocated_memory")
+        mps_recommended_max_memory_gb = _mps_memory_gb("recommended_max_memory")
+        gpu_memory_used_gb = mps_memory_allocated_gb
 
     return {
         "run_id": run_id,
         "global_env_step": global_env_step,
+        "device": str(device),
         "wall_time_elapsed_sec": time.perf_counter() - wall_time_start,
         "env_steps_per_second": env_steps_per_second,
         "updates_per_second": updates_per_second,
@@ -94,5 +116,8 @@ def collect_system_metrics(
         "ram_used_gb": ram_used_gb,
         "gpu_util_percent": gpu_util_percent,
         "gpu_memory_used_gb": gpu_memory_used_gb,
+        "mps_memory_allocated_gb": mps_memory_allocated_gb,
+        "mps_driver_allocated_gb": mps_driver_allocated_gb,
+        "mps_recommended_max_memory_gb": mps_recommended_max_memory_gb,
         "replay_buffer_memory_gb": replay_buffer_memory_gb,
     }

@@ -1,15 +1,14 @@
-```bash
-uv pip install -r requirements.txt
-uv pip install "gymnasium[box2d]"
-uv pip install "gymnasium[atari,other]" ale-py opencv-python
-```
-
 # LunarLander and Freeway DQN Experiments
 
 This repository contains a PyTorch/Gymnasium framework for DQN ablation
 experiments. The first supported environment is `LunarLander-v3`; Atari Freeway
 is supported with ALE preprocessing, frame stacking, CNN Q-networks, and
 Freeway-specific score/action metrics.
+
+## Installation
+
+```bash
+uv pip install -r requirements.txt```
 
 Run all LunarLander variants with the reference-scale defaults:
 
@@ -21,6 +20,25 @@ python -m rl_analysis.train --env LunarLander-v3 --variant all --seeds 0 1 2 3 4
 Seeds for each selected variant run concurrently by default. Use
 `--max-seed-workers N` to cap concurrency, or `--serial` to run one seed at a
 time.
+
+On Apple Silicon, use the MPS backend explicitly for local M1/M2/M3/M4 runs:
+
+```bash
+source mps_venv/bin/activate
+python -m rl_analysis.train --env LunarLander-v3 --variant dqn --seed 0 \
+  --device mps \
+  --serial
+```
+
+For multi-seed Apple Silicon runs, keep concurrency low so the unified memory
+pool does not get oversubscribed:
+
+```bash
+source mps_venv/bin/activate
+python -m rl_analysis.train --env LunarLander-v3 --variant all --seeds 0 1 2 3 4 \
+  --device mps \
+  --max-seed-workers 1
+```
 
 Run the full 10-seed LunarLander experiment suite:
 
@@ -40,25 +58,6 @@ Run the full 1M-step, 5-seed Freeway experiment suite:
 
 This script caps seed concurrency at two workers because Atari image replay
 buffers use much more memory than LunarLander vector replay buffers.
-
-Run the tuned Freeway learning check for the main variants:
-
-```bash
-./scripts/run_freeway_tuned_stage.sh stage1
-```
-
-This runs `dqn`, `double_dqn`, and `dueling_dqn` with a larger replay buffer,
-longer replay warmup, slower epsilon decay, higher final epsilon, and two seed
-workers. Stage 1 uses lighter diagnostics: 5 eval episodes every 50k env steps,
-so each seed logs about 20 eval rows instead of 100. If the Stage 1 acceptance
-check looks good, promote the same learning settings to a longer run:
-
-```bash
-./scripts/run_freeway_tuned_stage.sh stage2
-```
-
-Stage 2 uses 20 eval episodes every 100k env steps for report-quality curves
-without returning to the very heavy 10k-step evaluation cadence.
 
 Run one small smoke experiment:
 

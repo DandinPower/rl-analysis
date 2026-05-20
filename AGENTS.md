@@ -1,7 +1,7 @@
 # Python Virtual Environment
 
 1. This repo use `uv venv` to maintain python virtual environment (not uv init or uv add, etc.).
-2. For any python related commands, please activate the virtual environment first: `source .venv/bin/activate`. 
+2. For any python related commands, please activate the virtual environment first: `source mps_venv/bin/activate`. 
 3. This repo already installed all the required packages in the virtual environment. 
 4. Use `gitingest` under `rl/analysis` to generate a `digest.txt` file that contains all the necessary sourcecodes that can be used for report listing.
 

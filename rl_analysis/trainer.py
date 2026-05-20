@@ -221,6 +221,7 @@ class DQNTrainer:
                         collect_system_metrics(
                             run_id=self.config.run_id,
                             global_env_step=global_step,
+                            device=self.device,
                             wall_time_start=self.wall_time_start,
                             env_steps_per_second=global_step / elapsed if elapsed > 0 else None,
                             updates_per_second=updates_done / since_update if updates_done else 0.0,

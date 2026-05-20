@@ -46,7 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Seeds to run. Overrides --seed; defaults to 0 1 2 3 4 for --variant all.",
     )
     parser.add_argument("--output-root", default="output", help="Root directory for experiment artifacts.")
-    parser.add_argument("--device", default="auto", help="Torch device: auto, cpu, cuda, or cuda:N.")
+    parser.add_argument("--device", default="auto", help="Torch device: auto, cpu, cuda, cuda:N, or mps.")
     parser.add_argument(
         "--max-seed-workers",
         type=_positive_int,
