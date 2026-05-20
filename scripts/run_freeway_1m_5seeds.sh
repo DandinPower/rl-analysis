@@ -3,7 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-source .venv/bin/activate
+VENV_DIR="${VENV_DIR:-.venv}"
+source "$VENV_DIR/bin/activate"
 
 RUN_STAMP="$(date -u +%Y%m%d_%H%M%S)"
 OUTPUT_ROOT="output/full_freeway_1m_5seeds_${RUN_STAMP}"

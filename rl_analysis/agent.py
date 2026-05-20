@@ -19,6 +19,13 @@ def _as_tensor(array: np.ndarray, device: torch.device, dtype: torch.dtype) -> t
     return torch.as_tensor(array, dtype=dtype, device=device)
 
 
+def _diagnostic_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    tensor = tensor.detach()
+    if tensor.device.type == "mps":
+        return tensor.float().cpu()
+    return tensor
+
+
 def calculate_dqn_targets(
     *,
     online_network: nn.Module,
@@ -182,6 +189,7 @@ class DQNAgent:
         target_param_l2, target_param_l2_mean = self.target_parameter_distance()
 
         td_abs = torch.abs(td_errors.detach())
+        td_abs_stats = _diagnostic_tensor(td_abs)
         target_q_mean = double_dqn_diag["target_evaluated_selected_action_q_mean"]
         online_q_max_mean = float(q_values.detach().max(dim=1).values.mean().item())
         metrics = {
@@ -191,11 +199,11 @@ class DQNAgent:
                 "td_loss_mean": float(loss.detach().item()),
                 "td_loss_std": float(per_sample_loss.detach().std(unbiased=False).item()),
                 "td_error_mean": float(td_errors.detach().mean().item()),
-                "td_error_abs_mean": float(td_abs.mean().item()),
-                "td_error_abs_median": float(torch.median(td_abs).item()),
-                "td_error_abs_p90": float(torch.quantile(td_abs, 0.90).item()),
-                "td_error_abs_p95": float(torch.quantile(td_abs, 0.95).item()),
-                "td_error_abs_p99": float(torch.quantile(td_abs, 0.99).item()),
+                "td_error_abs_mean": float(td_abs_stats.mean().item()),
+                "td_error_abs_median": float(torch.median(td_abs_stats).item()),
+                "td_error_abs_p90": float(torch.quantile(td_abs_stats, 0.90).item()),
+                "td_error_abs_p95": float(torch.quantile(td_abs_stats, 0.95).item()),
+                "td_error_abs_p99": float(torch.quantile(td_abs_stats, 0.99).item()),
             },
             "q_values": {
                 "online_q_mean": float(q_values.detach().mean().item()),

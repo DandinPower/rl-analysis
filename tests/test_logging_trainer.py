@@ -1,7 +1,9 @@
 import json
 
+import torch
+
 from rl_analysis.config import build_run_config
-from rl_analysis.logging_utils import JSONLLogger
+from rl_analysis.logging_utils import JSONLLogger, collect_system_metrics
 from rl_analysis.trainer import DQNTrainer
 
 
@@ -11,6 +13,39 @@ def test_jsonl_logger_writes_one_json_object_per_line(tmp_path):
     logger.write({"b": 2, "a": 1})
     logger.close()
     assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1, "b": 2}
+
+
+def test_collect_system_metrics_reports_mps_memory(monkeypatch):
+    class FakeMPS:
+        @staticmethod
+        def current_allocated_memory():
+            return 1.5 * 1024**3
+
+        @staticmethod
+        def driver_allocated_memory():
+            return 2.0 * 1024**3
+
+        @staticmethod
+        def recommended_max_memory():
+            return 8.0 * 1024**3
+
+    monkeypatch.setattr(torch, "mps", FakeMPS, raising=False)
+
+    metrics = collect_system_metrics(
+        run_id="mps_test",
+        global_env_step=10,
+        device=torch.device("mps"),
+        wall_time_start=0.0,
+        env_steps_per_second=1.0,
+        updates_per_second=2.0,
+        replay_buffer_memory_gb=0.5,
+    )
+
+    assert metrics["device"] == "mps"
+    assert metrics["gpu_memory_used_gb"] == 1.5
+    assert metrics["mps_memory_allocated_gb"] == 1.5
+    assert metrics["mps_driver_allocated_gb"] == 2.0
+    assert metrics["mps_recommended_max_memory_gb"] == 8.0
 
 
 def test_trainer_creates_expected_output_files_with_tiny_run(tmp_path):

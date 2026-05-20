@@ -16,6 +16,25 @@ import numpy as np
 import torch
 
 
+def _mps_backend_available() -> bool:
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
+def _mps_backend_built() -> bool:
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built())
+
+
+def _mps_unavailable_message() -> str:
+    if not hasattr(torch.backends, "mps"):
+        return "MPS device requested, but this PyTorch install does not expose torch.backends.mps."
+    if not torch.backends.mps.is_built():
+        return "MPS device requested, but this PyTorch install was not built with MPS support."
+    return (
+        "MPS device requested, but MPS is not available. Use an Apple Silicon Mac with Metal support, "
+        "macOS 14.0 or newer, and an MPS-capable PyTorch install."
+    )
+
+
 def set_global_seeds(seed: int) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
@@ -24,14 +43,24 @@ def set_global_seeds(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, "mps") and torch.mps.is_available():
+        torch.mps.manual_seed(seed)
     if hasattr(torch.backends, "cudnn"):
         torch.backends.cudnn.benchmark = False
 
 
 def resolve_device(device_name: str) -> torch.device:
     if device_name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device_name)
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if _mps_backend_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    device = torch.device(device_name)
+    if device.type == "mps" and not _mps_backend_available():
+        raise RuntimeError(_mps_unavailable_message())
+    return device
 
 
 def to_jsonable(value: Any) -> Any:
@@ -163,10 +192,14 @@ def hardware_info(device: torch.device) -> dict[str, Any]:
     gpu_name = None
     if device.type == "cuda" and torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(device)
+    elif device.type == "mps" and _mps_backend_available():
+        gpu_name = "Apple Metal GPU"
     cpu_name = platform.processor() or os.uname().machine
     return {
         "device": str(device),
         "gpu_name": gpu_name,
         "cpu_name": cpu_name,
         "ram_gb": None,
+        "mps_available": _mps_backend_available(),
+        "mps_built": _mps_backend_built(),
     }
