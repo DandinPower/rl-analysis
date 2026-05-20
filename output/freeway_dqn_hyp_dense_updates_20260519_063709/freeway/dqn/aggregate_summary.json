@@ -1,0 +1,100 @@
+{
+  "area_under_eval_curve": {
+    "max": 8560000.0,
+    "mean": 2597500.0,
+    "median": 915000.0,
+    "min": 0.0,
+    "std": 3500922.1999353254
+  },
+  "best_eval_return": {
+    "max": 29.0,
+    "mean": 11.3,
+    "median": 8.1,
+    "min": 0.0,
+    "std": 11.627983488120371
+  },
+  "env_id": "ALE/Freeway-v5",
+  "failure_rate": {
+    "early_termination_rate": 0.0,
+    "nan_rate": 0.0,
+    "q_value_explosion_rate": 0.0
+  },
+  "final_eval_return": {
+    "max": 28.0,
+    "mean": 7.0,
+    "median": 0.0,
+    "min": 0.0,
+    "std": 12.12435565298214
+  },
+  "freeway": {
+    "final_zero_score_rate": {
+      "max": 1.0,
+      "mean": 0.75,
+      "median": 1.0,
+      "min": 0.0,
+      "std": 0.4330127018922193
+    },
+    "reference_dqn_score": 30.3,
+    "reference_human_score": 29.6,
+    "reference_random_score": 0.0,
+    "score_threshold_first_steps": {
+      "10.0": {
+        "max": 1200000.0,
+        "mean": 675000.0,
+        "median": 675000.0,
+        "min": 150000.0,
+        "std": 525000.0
+      },
+      "15.0": {
+        "max": 1250000.0,
+        "mean": 1250000.0,
+        "median": 1250000.0,
+        "min": 1250000.0,
+        "std": 0.0
+      },
+      "22.5": {
+        "max": 1300000.0,
+        "mean": 1300000.0,
+        "median": 1300000.0,
+        "min": 1300000.0,
+        "std": 0.0
+      },
+      "5.0": {
+        "max": 1150000.0,
+        "mean": 650000.0,
+        "median": 650000.0,
+        "min": 150000.0,
+        "std": 500000.0
+      }
+    },
+    "score_threshold_success_rates": {
+      "10.0": 0.5,
+      "15.0": 0.25,
+      "22.5": 0.25,
+      "5.0": 0.5
+    }
+  },
+  "num_seeds": 4,
+  "seeds": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "stability": {
+    "catastrophic_collapse_count_mean": 0.0,
+    "eval_return_across_seed_std_mean": 12.12435565298214,
+    "largest_eval_drop_mean": 0.25
+  },
+  "steps_to_threshold": {
+    "max": 1250000.0,
+    "mean": 1250000.0,
+    "median": 1250000.0,
+    "min": 1250000.0,
+    "num_seeds_reached": 1,
+    "std": 0.0,
+    "success_rate": 0.25,
+    "threshold": 15.0
+  },
+  "variant": "dqn"
+}

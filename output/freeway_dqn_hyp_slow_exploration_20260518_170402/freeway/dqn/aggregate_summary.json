@@ -1,0 +1,100 @@
+{
+  "area_under_eval_curve": {
+    "max": 1197500.0,
+    "mean": 539375.0,
+    "median": 452500.0,
+    "min": 55000.0,
+    "std": 413628.66423278744
+  },
+  "best_eval_return": {
+    "max": 10.0,
+    "mean": 5.0,
+    "median": 4.5,
+    "min": 1.0,
+    "std": 3.24037034920393
+  },
+  "env_id": "ALE/Freeway-v5",
+  "failure_rate": {
+    "early_termination_rate": 0.0,
+    "nan_rate": 0.0,
+    "q_value_explosion_rate": 0.0
+  },
+  "final_eval_return": {
+    "max": 0.1,
+    "mean": 0.025,
+    "median": 0.0,
+    "min": 0.0,
+    "std": 0.04330127018922194
+  },
+  "freeway": {
+    "final_zero_score_rate": {
+      "max": 1.0,
+      "mean": 0.975,
+      "median": 1.0,
+      "min": 0.9,
+      "std": 0.043301270189221926
+    },
+    "reference_dqn_score": 30.3,
+    "reference_human_score": 29.6,
+    "reference_random_score": 0.0,
+    "score_threshold_first_steps": {
+      "10.0": {
+        "max": 350000.0,
+        "mean": 350000.0,
+        "median": 350000.0,
+        "min": 350000.0,
+        "std": 0.0
+      },
+      "15.0": {
+        "max": null,
+        "mean": null,
+        "median": null,
+        "min": null,
+        "std": null
+      },
+      "22.5": {
+        "max": null,
+        "mean": null,
+        "median": null,
+        "min": null,
+        "std": null
+      },
+      "5.0": {
+        "max": 600000.0,
+        "mean": 475000.0,
+        "median": 475000.0,
+        "min": 350000.0,
+        "std": 125000.0
+      }
+    },
+    "score_threshold_success_rates": {
+      "10.0": 0.25,
+      "15.0": 0.0,
+      "22.5": 0.0,
+      "5.0": 0.5
+    }
+  },
+  "num_seeds": 4,
+  "seeds": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "stability": {
+    "catastrophic_collapse_count_mean": 0.0,
+    "eval_return_across_seed_std_mean": 0.04330127018922194,
+    "largest_eval_drop_mean": 0.0
+  },
+  "steps_to_threshold": {
+    "max": null,
+    "mean": null,
+    "median": null,
+    "min": null,
+    "num_seeds_reached": 0,
+    "std": null,
+    "success_rate": 0.0,
+    "threshold": 15.0
+  },
+  "variant": "dqn"
+}
