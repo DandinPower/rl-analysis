@@ -12,7 +12,13 @@ import torch
 
 from rl_analysis.agent import DQNAgent
 from rl_analysis.config import RunConfig
-from rl_analysis.envs import environment_config_dict, freeway_episode_metrics, lunarlander_episode_metrics, make_env
+from rl_analysis.envs import (
+    environment_config_dict,
+    freeway_episode_metrics,
+    freeway_up_biased_action_probabilities,
+    lunarlander_episode_metrics,
+    make_env,
+)
 from rl_analysis.logging_utils import RunLoggers, collect_system_metrics, write_run_config
 from rl_analysis.networks import build_q_network, network_architecture_dict
 from rl_analysis.replay import ReplayBuffer, Transition, replay_diagnostics, transition_to_batch
@@ -61,6 +67,11 @@ class DQNTrainer:
             dqn_config=config.dqn,
             optimizer_config=config.optimizer,
             device=self.device,
+        )
+        self.training_random_action_probabilities = (
+            freeway_up_biased_action_probabilities(action_dim, config.exploration.freeway_up_bias)
+            if config.env.env_id == "ALE/Freeway-v5" and config.exploration.freeway_up_bias > 0.0
+            else None
         )
         self.replay_buffer = (
             ReplayBuffer(
@@ -115,7 +126,12 @@ class DQNTrainer:
         with RunLoggers(self.run_dir) as loggers:
             while global_step < self.config.training.total_env_steps:
                 epsilon = self.config.exploration.epsilon_at(global_step)
-                action = self.agent.select_action(obs, epsilon, self.rng)
+                action = self.agent.select_action(
+                    obs,
+                    epsilon,
+                    self.rng,
+                    random_action_probabilities=self.training_random_action_probabilities,
+                )
                 next_obs, reward, terminated, truncated, _info = self.env.step(action)
                 global_step += 1
                 episode_return += float(reward)

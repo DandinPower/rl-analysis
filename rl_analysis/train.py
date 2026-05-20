@@ -72,6 +72,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--epsilon-decay-env-steps", type=int, default=None)
     parser.add_argument("--epsilon-final", type=float, default=None)
+    parser.add_argument(
+        "--freeway-up-bias",
+        type=float,
+        default=0.0,
+        help="Bias Freeway training exploration toward the up action. Must be in [0, 1].",
+    )
     return parser.parse_args(argv)
 
 
@@ -110,6 +116,7 @@ def _exploration_overrides(args: argparse.Namespace) -> dict:
     mapping = {
         "epsilon_decay_env_steps": args.epsilon_decay_env_steps,
         "epsilon_final": args.epsilon_final,
+        "freeway_up_bias": args.freeway_up_bias,
     }
     return {key: value for key, value in mapping.items() if value is not None}
 

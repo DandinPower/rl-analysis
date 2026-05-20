@@ -1,3 +1,5 @@
+import pytest
+
 from rl_analysis.config import build_run_config, get_env_profile, get_variant_spec
 
 
@@ -41,8 +43,44 @@ def test_freeway_profile_has_atari_runtime_defaults(tmp_path):
     assert config.dqn.target_update_frequency_env_steps == 8_000
     assert config.exploration.epsilon_final == 0.01
     assert config.exploration.epsilon_decay_env_steps == 250_000
+    assert config.exploration.freeway_up_bias == 0.0
     assert config.optimizer.learning_rate == 6.25e-5
     assert config.optimizer.epsilon == 1.5e-4
+
+
+def test_freeway_up_bias_override_is_allowed_for_freeway(tmp_path):
+    config = build_run_config(
+        env_id="freeway",
+        variant_name="dqn",
+        seed=0,
+        output_root=tmp_path,
+        exploration_overrides={"freeway_up_bias": 0.5},
+    )
+
+    assert config.exploration.freeway_up_bias == 0.5
+
+
+@pytest.mark.parametrize("freeway_up_bias", [-0.1, 1.1])
+def test_freeway_up_bias_rejects_out_of_range_values(tmp_path, freeway_up_bias):
+    with pytest.raises(ValueError, match="freeway_up_bias must be between"):
+        build_run_config(
+            env_id="freeway",
+            variant_name="dqn",
+            seed=0,
+            output_root=tmp_path,
+            exploration_overrides={"freeway_up_bias": freeway_up_bias},
+        )
+
+
+def test_freeway_up_bias_rejects_non_freeway_configs(tmp_path):
+    with pytest.raises(ValueError, match="freeway_up_bias can only be used"):
+        build_run_config(
+            env_id="LunarLander-v3",
+            variant_name="dqn",
+            seed=0,
+            output_root=tmp_path,
+            exploration_overrides={"freeway_up_bias": 0.5},
+        )
 
 
 def test_no_replay_variant_overrides_replay_hyperparameters(tmp_path):

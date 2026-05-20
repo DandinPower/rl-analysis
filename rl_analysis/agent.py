@@ -95,8 +95,16 @@ class DQNAgent:
         if self.target_network is not None:
             self.hard_update_target()
 
-    def select_action(self, observation: np.ndarray, epsilon: float, rng: np.random.Generator) -> int:
+    def select_action(
+        self,
+        observation: np.ndarray,
+        epsilon: float,
+        rng: np.random.Generator,
+        random_action_probabilities: np.ndarray | None = None,
+    ) -> int:
         if rng.random() < epsilon:
+            if random_action_probabilities is not None:
+                return int(rng.choice(self.action_dim, p=random_action_probabilities))
             return int(rng.integers(self.action_dim))
         obs_tensor = torch.as_tensor(observation, dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():

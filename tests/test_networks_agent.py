@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from rl_analysis.agent import calculate_dqn_targets
-from rl_analysis.config import NetworkConfig
+from rl_analysis.agent import DQNAgent, calculate_dqn_targets
+from rl_analysis.config import DQNHyperparameters, NetworkConfig, OptimizerConfig, get_variant_spec
 from rl_analysis.networks import build_q_network
 
 
@@ -42,6 +42,41 @@ class FixedQ(nn.Module):
 
     def forward(self, x):
         return self.rows[: x.shape[0]]
+
+
+class RandomBranchQ(nn.Module):
+    action_dim = 3
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        return torch.zeros(x.shape[0], self.action_dim, dtype=torch.float32, device=x.device)
+
+
+def test_select_action_uses_random_action_probabilities_when_exploring():
+    agent = DQNAgent(
+        online_network=RandomBranchQ(),
+        target_network=None,
+        variant=get_variant_spec("dqn_no_target"),
+        dqn_config=DQNHyperparameters(),
+        optimizer_config=OptimizerConfig(),
+        device=torch.device("cpu"),
+    )
+    probabilities = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    actions = [
+        agent.select_action(
+            np.zeros(1, dtype=np.float32),
+            epsilon=1.0,
+            rng=np.random.default_rng(seed),
+            random_action_probabilities=probabilities,
+        )
+        for seed in range(10)
+    ]
+
+    assert actions == [1] * 10
 
 
 def test_double_dqn_target_uses_online_selection_and_target_evaluation():

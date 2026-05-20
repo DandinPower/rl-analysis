@@ -26,6 +26,12 @@ def test_max_seed_workers_must_be_positive():
         train.parse_args(["--max-seed-workers", "0"])
 
 
+def test_freeway_up_bias_is_included_in_exploration_overrides():
+    args = train.parse_args(["--env", "freeway", "--freeway-up-bias", "0.75"])
+
+    assert train._exploration_overrides(args)["freeway_up_bias"] == 0.75
+
+
 def test_main_serial_runs_seed_configs_in_order(monkeypatch, tmp_path):
     seen = []
 

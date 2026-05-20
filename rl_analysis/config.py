@@ -191,6 +191,11 @@ class ExplorationConfig:
     epsilon_final: float = 0.05
     epsilon_decay_env_steps: int = 100_000
     eval_epsilon: float = 0.001
+    freeway_up_bias: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.freeway_up_bias <= 1.0:
+            raise ValueError("freeway_up_bias must be between 0.0 and 1.0.")
 
     def epsilon_at(self, env_step: int) -> float:
         if self.epsilon_decay_env_steps <= 0:
@@ -339,6 +344,8 @@ def build_run_config(
         dqn = replace(dqn, **dqn_overrides)
     if exploration_overrides:
         exploration = replace(exploration, **exploration_overrides)
+    if env.env_id != "ALE/Freeway-v5" and exploration.freeway_up_bias != 0.0:
+        raise ValueError("freeway_up_bias can only be used with ALE/Freeway-v5.")
     if network_overrides:
         network = replace(network, **network_overrides)
     if optimizer_overrides:

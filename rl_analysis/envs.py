@@ -11,6 +11,11 @@ import numpy as np
 from rl_analysis.config import EnvironmentProfile, get_env_profile
 
 
+FREEWAY_ACTION_NOOP = 0
+FREEWAY_ACTION_UP = 1
+FREEWAY_ACTION_DOWN = 2
+
+
 def make_env(env_id: str | EnvironmentProfile, *, seed: int | None = None, render_mode: str | None = None):
     profile = get_env_profile(env_id) if isinstance(env_id, str) else env_id
     if profile.env_id == "ALE/Freeway-v5":
@@ -83,6 +88,18 @@ def environment_config_dict(profile: EnvironmentProfile) -> dict[str, Any]:
     return payload
 
 
+def freeway_up_biased_action_probabilities(action_dim: int, freeway_up_bias: float) -> np.ndarray:
+    if action_dim <= FREEWAY_ACTION_UP:
+        raise ValueError("Freeway up-biased exploration requires an action space with an up action.")
+    if not 0.0 <= freeway_up_bias <= 1.0:
+        raise ValueError("freeway_up_bias must be between 0.0 and 1.0.")
+
+    base_probability = (1.0 - freeway_up_bias) / action_dim
+    probabilities = np.full(action_dim, base_probability, dtype=np.float64)
+    probabilities[FREEWAY_ACTION_UP] += freeway_up_bias
+    return probabilities
+
+
 def lunarlander_episode_metrics(
     *,
     episode_return: float,
@@ -133,7 +150,13 @@ def freeway_episode_metrics(
         "score_raw": score,
         "zero_score_episode": bool(score <= 0.0),
         "max_score_so_far": float(max_score_so_far),
-        "action_noop_fraction": float(action_counts[0] / safe_length) if action_counts.size > 0 else 0.0,
-        "action_up_fraction": float(action_counts[1] / safe_length) if action_counts.size > 1 else 0.0,
-        "action_down_fraction": float(action_counts[2] / safe_length) if action_counts.size > 2 else 0.0,
+        "action_noop_fraction": float(action_counts[FREEWAY_ACTION_NOOP] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_NOOP
+        else 0.0,
+        "action_up_fraction": float(action_counts[FREEWAY_ACTION_UP] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_UP
+        else 0.0,
+        "action_down_fraction": float(action_counts[FREEWAY_ACTION_DOWN] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_DOWN
+        else 0.0,
     }

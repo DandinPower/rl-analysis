@@ -24,7 +24,7 @@ time.
 On Apple Silicon, use the MPS backend explicitly for local M1/M2/M3/M4 runs:
 
 ```bash
-source mps_venv/bin/activate
+source .venv/bin/activate
 python -m rl_analysis.train --env LunarLander-v3 --variant dqn --seed 0 \
   --device mps \
   --serial
@@ -34,7 +34,7 @@ For multi-seed Apple Silicon runs, keep concurrency low so the unified memory
 pool does not get oversubscribed:
 
 ```bash
-source mps_venv/bin/activate
+source .venv/bin/activate
 python -m rl_analysis.train --env LunarLander-v3 --variant all --seeds 0 1 2 3 4 \
   --device mps \
   --max-seed-workers 1
