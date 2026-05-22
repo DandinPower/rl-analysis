@@ -5,7 +5,7 @@
 3. This repo already installed all the required packages in the virtual environment. 
 4. Use `gitingest` under `rl/analysis` to generate a `digest.txt` file that contains all the necessary sourcecodes that can be used for report listing.
 
-# Analysis Branch Scope
+# For Preliminary Analysis
 
 1. Keep all new implementation for this branch inside the `analysis/` folder.
 2. Do not modify original project code or root project files unless the user explicitly asks for that change.
