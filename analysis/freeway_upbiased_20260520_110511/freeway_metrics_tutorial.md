@@ -28,6 +28,6 @@ The Q overestimation proxy compares the online max Q value with the target-side 
 
 ## Freeway Behavior Metrics
 
-`zero_score_rate` is the fraction of evaluation episodes that scored zero. In this result set it should be near zero for trained agents.
+`zero_score_rate` is the fraction of evaluation episodes that scored zero. In this result set it is near zero for the replay-based trained agents, while the no-replay ablation can finish with many zero-score episodes after reaching useful scores earlier.
 
 `action_up_fraction_mean`, `action_down_fraction_mean`, and `action_noop_fraction_mean` summarize the final policy's action mix during evaluation. Because this experiment used an up-biased exploration setting during training, these action fractions help check whether the final greedy policy still relies heavily on upward movement or also learns when to wait.

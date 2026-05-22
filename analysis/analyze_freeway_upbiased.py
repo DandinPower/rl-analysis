@@ -27,6 +27,8 @@ import pandas as pd
 
 VARIANT_ORDER = [
     "dqn",
+    "dqn_no_target",
+    "dqn_no_replay",
     "double_dqn",
     "dueling_dqn",
     "double_dueling_dqn",
@@ -34,6 +36,8 @@ VARIANT_ORDER = [
 
 VARIANT_LABELS = {
     "dqn": "DQN baseline",
+    "dqn_no_target": "DQN without target network",
+    "dqn_no_replay": "DQN without replay buffer",
     "double_dqn": "Double DQN",
     "dueling_dqn": "Dueling DQN",
     "double_dueling_dqn": "Double + Dueling DQN",
@@ -41,6 +45,8 @@ VARIANT_LABELS = {
 
 SHORT_LABELS = {
     "dqn": "DQN",
+    "dqn_no_target": "No target",
+    "dqn_no_replay": "No replay",
     "double_dqn": "Double",
     "dueling_dqn": "Dueling",
     "double_dueling_dqn": "Double+\nDueling",
@@ -48,6 +54,8 @@ SHORT_LABELS = {
 
 VARIANT_NOTES = {
     "dqn": "Baseline DQN with experience replay and a periodically copied target network.",
+    "dqn_no_target": "DQN without a target network uses the online network directly in the bootstrap target.",
+    "dqn_no_replay": "DQN without replay trains from recent correlated transitions instead of a replay buffer.",
     "double_dqn": "Double DQN uses the online network to select the next action and the target network to evaluate it.",
     "dueling_dqn": "Dueling DQN splits the network head into state-value and action-advantage streams.",
     "double_dueling_dqn": "Double + Dueling DQN combines Double DQN target selection with the dueling architecture.",
@@ -55,6 +63,8 @@ VARIANT_NOTES = {
 
 COLORS = {
     "dqn": "#2E86AB",
+    "dqn_no_target": "#D1495B",
+    "dqn_no_replay": "#7A7A7A",
     "double_dqn": "#2A9D8F",
     "dueling_dqn": "#F4A261",
     "double_dueling_dqn": "#6D597A",
@@ -740,7 +750,7 @@ def add_freeway_reference_lines(ax: plt.Axes, include_success: bool = True) -> N
 
 
 def plot_learning_curves(eval_curve: pd.DataFrame, figures_dir: Path) -> None:
-    fig, ax = plt.subplots(figsize=(10, 5.6))
+    fig, ax = plt.subplots(figsize=(11, 5.8))
     for variant in ordered_variants(eval_curve):
         curve = eval_curve[eval_curve["variant"] == variant]
         x = curve["global_env_step"].to_numpy(dtype=float)
@@ -753,7 +763,7 @@ def plot_learning_curves(eval_curve: pd.DataFrame, figures_dir: Path) -> None:
     ax.set_xlabel("Environment steps")
     ax.set_ylabel("Evaluation score mean")
     ax.set_title("Freeway evaluation learning curves across seeds")
-    ax.legend(ncol=2)
+    ax.legend(ncol=3)
     fig.tight_layout()
     fig.savefig(figures_dir / "fig_eval_learning_curves.png", bbox_inches="tight")
     plt.close(fig)
@@ -762,7 +772,7 @@ def plot_learning_curves(eval_curve: pd.DataFrame, figures_dir: Path) -> None:
 def plot_final_score(summary_df: pd.DataFrame, figures_dir: Path) -> None:
     variants = ordered_variants(summary_df)
     data = [summary_df[summary_df["variant"] == variant]["final_score"].to_numpy(dtype=float) for variant in variants]
-    fig, ax = plt.subplots(figsize=(9, 5.4))
+    fig, ax = plt.subplots(figsize=(10, 5.4))
     boxes = ax.boxplot(data, patch_artist=True, tick_labels=[SHORT_LABELS[v] for v in variants], showfliers=False)
     for patch, variant in zip(boxes["boxes"], variants):
         patch.set_facecolor(COLORS[variant])
@@ -788,7 +798,7 @@ def plot_paired_deltas(paired: pd.DataFrame, figures_dir: Path) -> None:
     y = np.arange(len(df))
     means = df["final_delta_mean"].to_numpy(dtype=float)
     errs = df["final_delta_ci95"].fillna(0.0).to_numpy(dtype=float)
-    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    fig, ax = plt.subplots(figsize=(9, 5.4))
     ax.barh(y, means, xerr=errs, capsize=3, color=[COLORS[v] for v in df["variant"]], alpha=0.9)
     ax.axvline(0, color="#333333", linewidth=1)
     ax.set_yticks(y)
@@ -803,7 +813,7 @@ def plot_paired_deltas(paired: pd.DataFrame, figures_dir: Path) -> None:
 def plot_sample_efficiency(variant_summary: pd.DataFrame, summary_df: pd.DataFrame, figures_dir: Path) -> None:
     variants = ordered_variants(variant_summary)
     total_steps = int(summary_df["total_env_steps"].dropna().max())
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.9))
     bar_with_ci(
         axes[0],
         variant_summary,
@@ -975,8 +985,8 @@ def plot_phase_scores(phase_summary: pd.DataFrame, figures_dir: Path) -> None:
     variants = ordered_variants(phase_summary)
     phases = list(phase_summary["phase"].dropna().unique())
     x = np.arange(len(phases))
-    width = 0.16
-    fig, ax = plt.subplots(figsize=(10.5, 5.2))
+    width = min(0.16, 0.76 / max(len(variants), 1))
+    fig, ax = plt.subplots(figsize=(11.5, 5.4))
     offset_start = -width * (len(variants) - 1) / 2
     for idx, variant in enumerate(variants):
         subset = phase_summary[phase_summary["variant"] == variant].set_index("phase")
@@ -1002,7 +1012,7 @@ def plot_phase_scores(phase_summary: pd.DataFrame, figures_dir: Path) -> None:
     ax.set_xticklabels(phases)
     ax.set_ylabel("Mean evaluation score in phase")
     ax.set_title("Early, middle, and late Freeway performance")
-    ax.legend(ncol=2)
+    ax.legend(ncol=3)
     fig.tight_layout()
     fig.savefig(figures_dir / "fig_phase_scores.png", bbox_inches="tight")
     plt.close(fig)
@@ -1165,7 +1175,7 @@ The Q overestimation proxy compares the online max Q value with the target-side 
 
 ## Freeway Behavior Metrics
 
-`zero_score_rate` is the fraction of evaluation episodes that scored zero. In this result set it should be near zero for trained agents.
+`zero_score_rate` is the fraction of evaluation episodes that scored zero. In this result set it is near zero for the replay-based trained agents, while the no-replay ablation can finish with many zero-score episodes after reaching useful scores earlier.
 
 `action_up_fraction_mean`, `action_down_fraction_mean`, and `action_noop_fraction_mean` summarize the final policy's action mix during evaluation. Because this experiment used an up-biased exploration setting during training, these action fractions help check whether the final greedy policy still relies heavily on upward movement or also learns when to wait.
 """
@@ -1195,6 +1205,8 @@ def write_report(
 ) -> None:
     vs = variant_summary.set_index("variant")
     baseline = vs.loc["dqn"]
+    no_target = vs.loc["dqn_no_target"]
+    no_replay = vs.loc["dqn_no_replay"]
     double = vs.loc["double_dqn"]
     dueling = vs.loc["dueling_dqn"]
     double_dueling = vs.loc["double_dueling_dqn"]
@@ -1208,6 +1220,16 @@ def write_report(
     success_threshold = summary_df["success_threshold"].dropna().iloc[0]
     up_bias_values = sorted(summary_df["freeway_up_bias"].dropna().unique())
     up_bias_text = ", ".join(format_number(value, 2) for value in up_bias_values) if up_bias_values else "n/a"
+    no_replay_runs = summary_df[summary_df["variant"] == "dqn_no_replay"]
+    no_replay_near_zero_count = int((no_replay_runs["final_score"] <= 1.0).sum())
+    no_replay_reached_then_failed_count = int(
+        (no_replay_runs["reached_threshold"] & (no_replay_runs["final_score"] < no_replay_runs["success_threshold"])).sum()
+    )
+    no_replay_timing = (
+        "earlier than"
+        if float(no_replay["first_reach_step_median"]) < float(baseline["first_reach_step_median"])
+        else "later than"
+    )
 
     def paired_sentence(variant: str) -> str:
         row = paired_index.loc[variant]
@@ -1239,12 +1261,27 @@ def write_report(
         if float(double_dueling["final_score_mean"]) < max(float(double["final_score_mean"]), float(dueling["final_score_mean"]))
         else "The combined variant was competitive with the separate extensions."
     )
+    no_target_note = (
+        "Removing the target network reduced final mean score versus baseline."
+        if float(no_target["final_score_mean"]) < float(baseline["final_score_mean"])
+        else "Removing the target network remained competitive with baseline on final mean score."
+    )
+    no_replay_note = (
+        f"{count_text(no_replay_near_zero_count, int(no_replay['n']))} finished at score <= 1.0."
+        if no_replay_near_zero_count
+        else "No no-replay seed finished near zero."
+    )
+    no_replay_collapse_note = (
+        f"{count_text(no_replay_reached_then_failed_count, int(no_replay['n']))} reached score 15 at least once but finished below 15."
+        if no_replay_reached_then_failed_count
+        else "No no-replay seed both reached score 15 and finished below it."
+    )
 
     report = f"""# {report_title}
 
 ## Data and Method
 
-This report analyzes `{output_path}/` with the four requested variants: DQN, Double DQN, Dueling DQN, and Double + Dueling DQN. There are {len(summary_df)} completed runs, with {seed_count} seeds per variant. Each run used {format_steps(summary_df['total_env_steps'].max())} environment steps, about {format_steps(summary_df['total_ale_frames'].max())} ALE frames, and Freeway up-bias `{up_bias_text}` during exploration. The success threshold is score >= {format_number(success_threshold, 1)}.
+This report analyzes `{output_path}/` with six variants: DQN, DQN without target network, DQN without replay buffer, Double DQN, Dueling DQN, and Double + Dueling DQN. There are {len(summary_df)} completed runs, with {seed_count} seeds per variant. Each run used {format_steps(summary_df['total_env_steps'].max())} environment steps, about {format_steps(summary_df['total_ale_frames'].max())} ALE frames, and Freeway up-bias `{up_bias_text}` during exploration. The success threshold is score >= {format_number(success_threshold, 1)}.
 
 All statistics are computed from `summary.json`, `eval_metrics.jsonl`, and `train_update_metrics.jsonl`. Intervals are 95 percent t-intervals across seeds. With {seed_count} seeds per variant, these intervals are uncertainty estimates rather than strong significance claims.
 
@@ -1280,6 +1317,18 @@ The baseline is a strong reference for this up-biased setting. Its final score i
 
 ![Training phase scores](figures/freeway/fig_phase_scores.png)
 
+## Ablation: Removing the Target Network
+
+{VARIANT_NOTES['dqn_no_target']} It finished with mean score {mean_ci_text(no_target['final_score_mean'], no_target['final_score_ci95'], digits=2)}, reached score 15 in {count_text(int(no_target['threshold_reach_count']), int(no_target['n']))}, and reached score 22.5 in {count_text(int(no_target['score_22_5_reach_count']), int(no_target['n']))}.
+
+{paired_sentence('dqn_no_target')} {no_target_note} Its average collapse count was {format_number(no_target['collapse_count_mean'], 1)}, compared with {format_number(baseline['collapse_count_mean'], 1)} for DQN, and its best-final gap was {format_number(no_target['best_final_gap_mean'], 2)} versus {format_number(baseline['best_final_gap_mean'], 2)} for DQN.
+
+## Ablation: Removing Replay
+
+{VARIANT_NOTES['dqn_no_replay']} It finished with mean score {mean_ci_text(no_replay['final_score_mean'], no_replay['final_score_ci95'], digits=2)}, reached score 15 in {count_text(int(no_replay['threshold_reach_count']), int(no_replay['n']))}, and reached score 22.5 in {count_text(int(no_replay['score_22_5_reach_count']), int(no_replay['n']))}.
+
+{paired_sentence('dqn_no_replay')} The no-replay variant often reaches useful scores earlier but can finish near zero: its median first reach step was {format_steps(no_replay['first_reach_step_median'])}, {no_replay_timing} baseline's {format_steps(baseline['first_reach_step_median'])}, but {no_replay_note} {no_replay_collapse_note} This makes the collapse and stability metrics central to interpreting the ablation, not secondary diagnostics.
+
 ## Double DQN
 
 {VARIANT_NOTES['double_dqn']} It finished with mean score {mean_ci_text(double['final_score_mean'], double['final_score_ci95'], digits=2)}, reached score 15 in {count_text(int(double['threshold_reach_count']), int(double['n']))}, and reached score 22.5 in {count_text(int(double['score_22_5_reach_count']), int(double['n']))}.
@@ -1310,17 +1359,17 @@ Final evaluation behavior summary:
 
 {behavior_table(final_behavior)}
 
-The behavior table and figure show that all variants avoid zero-score episodes at the end, so the main comparison is score quality and action mix rather than basic task discovery.
+The behavior table and figure show that replay-based variants avoid zero-score episodes at the end. The no-replay ablation is the exception, so its final action mix should be read together with its late collapse and near-zero final scores.
 
 ![Freeway behavior diagnostics](figures/freeway/fig_freeway_behavior.png)
 
 ## Main Conclusions
 
-All four requested variants learned useful Freeway policies under the up-biased exploration setting. Every seed reached the configured score-15 threshold, so final quality, whole-training AUC, and late stability are more informative than simple success rate.
+The replay-based variants learned useful Freeway policies under the up-biased exploration setting. Every variant reached the configured score-15 threshold in at least some seeds, but the no-replay ablation shows that early or temporary threshold crossing is not enough when the final policy can collapse.
 
 {best_final_variant['variant_label']} had the best final mean score. {best_auc_variant['variant_label']} had the best normalized AUC, which means it had the strongest score profile over the full 1M-step budget.
 
-The combined Double + Dueling variant was not automatically better than the separate extensions in this run. The result supports comparing these variants by matched seeds and learning curves, not only by their architectural intent.
+The no-replay result is the clearest ablation failure. The combined Double + Dueling variant was not automatically better than the separate extensions in this run. The result supports comparing these variants by matched seeds and learning curves, not only by their architectural intent.
 """
     (analysis_dir / report_name).write_text(report, encoding="utf-8")
 

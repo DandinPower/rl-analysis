@@ -4,6 +4,7 @@ Directory structure:
     ├── agent.py
     ├── aggregate.py
     ├── config.py
+    ├── demo.py
     ├── envs.py
     ├── logging_utils.py
     ├── networks.py
@@ -128,8 +129,16 @@ class DQNAgent:
         if self.target_network is not None:
             self.hard_update_target()
 
-    def select_action(self, observation: np.ndarray, epsilon: float, rng: np.random.Generator) -> int:
+    def select_action(
+        self,
+        observation: np.ndarray,
+        epsilon: float,
+        rng: np.random.Generator,
+        random_action_probabilities: np.ndarray | None = None,
+    ) -> int:
         if rng.random() < epsilon:
+            if random_action_probabilities is not None:
+                return int(rng.choice(self.action_dim, p=random_action_probabilities))
             return int(rng.integers(self.action_dim))
         obs_tensor = torch.as_tensor(observation, dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
@@ -763,6 +772,11 @@ class ExplorationConfig:
     epsilon_final: float = 0.05
     epsilon_decay_env_steps: int = 100_000
     eval_epsilon: float = 0.001
+    freeway_up_bias: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.freeway_up_bias <= 1.0:
+            raise ValueError("freeway_up_bias must be between 0.0 and 1.0.")
 
     def epsilon_at(self, env_step: int) -> float:
         if self.epsilon_decay_env_steps <= 0:
@@ -911,6 +925,8 @@ def build_run_config(
         dqn = replace(dqn, **dqn_overrides)
     if exploration_overrides:
         exploration = replace(exploration, **exploration_overrides)
+    if env.env_id != "ALE/Freeway-v5" and exploration.freeway_up_bias != 0.0:
+        raise ValueError("freeway_up_bias can only be used with ALE/Freeway-v5.")
     if network_overrides:
         network = replace(network, **network_overrides)
     if optimizer_overrides:
@@ -938,6 +954,248 @@ def build_run_config(
 
 
 ================================================
+FILE: demo.py
+================================================
+"""Run recorded demos from trained DQN checkpoints."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from gymnasium.wrappers import RecordVideo
+from torch import nn
+
+from rl_analysis.config import NetworkConfig, get_variant_spec
+from rl_analysis.envs import make_env
+from rl_analysis.networks import build_q_network
+from rl_analysis.utils import resolve_device
+
+
+REQUIRED_CHECKPOINT_KEYS = (
+    "config",
+    "online_network_state_dict",
+    "run_id",
+    "variant",
+    "seed",
+)
+
+
+@dataclass(frozen=True)
+class DemoResult:
+    checkpoint_path: Path
+    env_id: str
+    run_id: str
+    variant: str
+    seed: int
+    global_env_step: int | None
+    episode_returns: list[float]
+    episode_lengths: list[int]
+    video_paths: list[Path]
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a recorded policy demo from a DQN checkpoint.")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="Path to a model_step_*.pt checkpoint.")
+    parser.add_argument("--episodes", type=_positive_int, default=1, help="Number of episodes to record.")
+    parser.add_argument("--video-dir", type=Path, default=Path("output/demos"), help="Directory for MP4 output.")
+    parser.add_argument("--device", default="auto", help="Torch device: auto, cpu, cuda, cuda:N, or mps.")
+    return parser.parse_args(argv)
+
+
+def validate_checkpoint_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Checkpoint payload must be a dictionary.")
+
+    missing = [key for key in REQUIRED_CHECKPOINT_KEYS if key not in payload]
+    if missing:
+        raise ValueError(f"Checkpoint payload is missing required key(s): {', '.join(missing)}.")
+
+    config = payload["config"]
+    if not isinstance(config, dict):
+        raise ValueError("Checkpoint config must be a dictionary.")
+
+    env_config = config.get("env")
+    if not isinstance(env_config, dict) or not env_config.get("env_id"):
+        raise ValueError("Checkpoint config must include config.env.env_id.")
+
+    network_config = config.get("network")
+    if not isinstance(network_config, dict):
+        raise ValueError("Checkpoint config must include config.network.")
+
+    if not isinstance(payload["online_network_state_dict"], dict):
+        raise ValueError("Checkpoint online_network_state_dict must be a state-dict dictionary.")
+
+    get_variant_spec(str(payload["variant"]))
+    return payload
+
+
+def load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
+    resolved_path = checkpoint_path.expanduser()
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Checkpoint does not exist: {resolved_path}")
+    payload = torch.load(resolved_path, map_location="cpu", weights_only=False)
+    return validate_checkpoint_payload(payload)
+
+
+def network_config_from_checkpoint(payload: dict[str, Any]) -> NetworkConfig:
+    validate_checkpoint_payload(payload)
+    allowed_fields = set(NetworkConfig.__dataclass_fields__)
+    raw_config = payload["config"]["network"]
+    return NetworkConfig(**{key: value for key, value in raw_config.items() if key in allowed_fields})
+
+
+def env_id_from_checkpoint(payload: dict[str, Any]) -> str:
+    validate_checkpoint_payload(payload)
+    return str(payload["config"]["env"]["env_id"])
+
+
+def build_network_from_checkpoint(
+    payload: dict[str, Any],
+    observation_shape: tuple[int, ...],
+    action_dim: int,
+    device: torch.device,
+) -> nn.Module:
+    network = build_q_network(observation_shape, action_dim, network_config_from_checkpoint(payload))
+    network.load_state_dict(payload["online_network_state_dict"])
+    network.to(device)
+    network.eval()
+    return network
+
+
+def select_greedy_action(network: nn.Module, observation: np.ndarray, device: torch.device) -> int:
+    obs_tensor = torch.as_tensor(np.asarray(observation), dtype=torch.float32, device=device).unsqueeze(0)
+    with torch.no_grad():
+        q_values = network(obs_tensor)
+    return int(torch.argmax(q_values, dim=1).item())
+
+
+def run_demo_episode(env, network: nn.Module, device: torch.device, *, seed: int) -> tuple[float, int]:
+    observation, _info = env.reset(seed=seed)
+    done = False
+    episode_return = 0.0
+    episode_length = 0
+    while not done:
+        action = select_greedy_action(network, observation, device)
+        observation, reward, terminated, truncated, _info = env.step(action)
+        episode_return += float(reward)
+        episode_length += 1
+        done = bool(terminated or truncated)
+    return episode_return, episode_length
+
+
+def _safe_name(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
+    return safe[:80] or "checkpoint"
+
+
+def run_demo(
+    *,
+    checkpoint_path: Path,
+    episodes: int,
+    video_dir: Path,
+    device_name: str,
+) -> DemoResult:
+    payload = load_checkpoint_payload(checkpoint_path)
+    env_id = env_id_from_checkpoint(payload)
+    run_id = str(payload["run_id"])
+    variant = str(payload["variant"])
+    seed = int(payload["seed"])
+    global_env_step = payload.get("global_env_step")
+    if global_env_step is not None:
+        global_env_step = int(global_env_step)
+
+    device = resolve_device(device_name)
+    video_dir = video_dir.expanduser()
+    video_dir.mkdir(parents=True, exist_ok=True)
+    existing_videos = set(video_dir.glob("*.mp4"))
+
+    env = None
+    episode_returns: list[float] = []
+    episode_lengths: list[int] = []
+    try:
+        env = make_env(env_id, seed=seed, render_mode="rgb_array")
+        env = RecordVideo(
+            env,
+            video_folder=str(video_dir),
+            episode_trigger=lambda _episode_id: True,
+            name_prefix=f"{_safe_name(run_id)}-demo",
+            disable_logger=True,
+        )
+        observation_shape = tuple(int(dim) for dim in env.observation_space.shape)
+        action_dim = int(env.action_space.n)
+        network = build_network_from_checkpoint(payload, observation_shape, action_dim, device)
+
+        for episode_index in range(episodes):
+            episode_return, episode_length = run_demo_episode(
+                env,
+                network,
+                device,
+                seed=seed + 200_000 + episode_index,
+            )
+            episode_returns.append(episode_return)
+            episode_lengths.append(episode_length)
+    finally:
+        if env is not None:
+            env.close()
+
+    video_paths = sorted(path for path in video_dir.glob("*.mp4") if path not in existing_videos)
+    return DemoResult(
+        checkpoint_path=checkpoint_path.expanduser(),
+        env_id=env_id,
+        run_id=run_id,
+        variant=variant,
+        seed=seed,
+        global_env_step=global_env_step,
+        episode_returns=episode_returns,
+        episode_lengths=episode_lengths,
+        video_paths=video_paths,
+    )
+
+
+def print_summary(result: DemoResult) -> None:
+    print(f"Checkpoint: {result.checkpoint_path}")
+    print(f"Run: {result.run_id} ({result.env_id}, {result.variant}, seed={result.seed})")
+    if result.global_env_step is not None:
+        print(f"Checkpoint step: {result.global_env_step}")
+    print(f"Episode returns: {result.episode_returns}")
+    print(f"Episode lengths: {result.episode_lengths}")
+    if result.video_paths:
+        print("Videos:")
+        for path in result.video_paths:
+            print(f"  {path}")
+    else:
+        print("Videos: none found")
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    result = run_demo(
+        checkpoint_path=args.checkpoint,
+        episodes=args.episodes,
+        video_dir=args.video_dir,
+        device_name=args.device,
+    )
+    print_summary(result)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
 FILE: envs.py
 ================================================
 """Environment creation and environment-specific metrics."""
@@ -951,6 +1209,11 @@ import gymnasium as gym
 import numpy as np
 
 from rl_analysis.config import EnvironmentProfile, get_env_profile
+
+
+FREEWAY_ACTION_NOOP = 0
+FREEWAY_ACTION_UP = 1
+FREEWAY_ACTION_DOWN = 2
 
 
 def make_env(env_id: str | EnvironmentProfile, *, seed: int | None = None, render_mode: str | None = None):
@@ -1025,6 +1288,18 @@ def environment_config_dict(profile: EnvironmentProfile) -> dict[str, Any]:
     return payload
 
 
+def freeway_up_biased_action_probabilities(action_dim: int, freeway_up_bias: float) -> np.ndarray:
+    if action_dim <= FREEWAY_ACTION_UP:
+        raise ValueError("Freeway up-biased exploration requires an action space with an up action.")
+    if not 0.0 <= freeway_up_bias <= 1.0:
+        raise ValueError("freeway_up_bias must be between 0.0 and 1.0.")
+
+    base_probability = (1.0 - freeway_up_bias) / action_dim
+    probabilities = np.full(action_dim, base_probability, dtype=np.float64)
+    probabilities[FREEWAY_ACTION_UP] += freeway_up_bias
+    return probabilities
+
+
 def lunarlander_episode_metrics(
     *,
     episode_return: float,
@@ -1075,9 +1350,15 @@ def freeway_episode_metrics(
         "score_raw": score,
         "zero_score_episode": bool(score <= 0.0),
         "max_score_so_far": float(max_score_so_far),
-        "action_noop_fraction": float(action_counts[0] / safe_length) if action_counts.size > 0 else 0.0,
-        "action_up_fraction": float(action_counts[1] / safe_length) if action_counts.size > 1 else 0.0,
-        "action_down_fraction": float(action_counts[2] / safe_length) if action_counts.size > 2 else 0.0,
+        "action_noop_fraction": float(action_counts[FREEWAY_ACTION_NOOP] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_NOOP
+        else 0.0,
+        "action_up_fraction": float(action_counts[FREEWAY_ACTION_UP] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_UP
+        else 0.0,
+        "action_down_fraction": float(action_counts[FREEWAY_ACTION_DOWN] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_DOWN
+        else 0.0,
     }
 
 
@@ -1681,6 +1962,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--epsilon-decay-env-steps", type=int, default=None)
     parser.add_argument("--epsilon-final", type=float, default=None)
+    parser.add_argument(
+        "--freeway-up-bias",
+        type=float,
+        default=0.0,
+        help="Bias Freeway training exploration toward the up action. Must be in [0, 1].",
+    )
     return parser.parse_args(argv)
 
 
@@ -1719,6 +2006,7 @@ def _exploration_overrides(args: argparse.Namespace) -> dict:
     mapping = {
         "epsilon_decay_env_steps": args.epsilon_decay_env_steps,
         "epsilon_final": args.epsilon_final,
+        "freeway_up_bias": args.freeway_up_bias,
     }
     return {key: value for key, value in mapping.items() if value is not None}
 
@@ -1844,7 +2132,13 @@ import torch
 
 from rl_analysis.agent import DQNAgent
 from rl_analysis.config import RunConfig
-from rl_analysis.envs import environment_config_dict, freeway_episode_metrics, lunarlander_episode_metrics, make_env
+from rl_analysis.envs import (
+    environment_config_dict,
+    freeway_episode_metrics,
+    freeway_up_biased_action_probabilities,
+    lunarlander_episode_metrics,
+    make_env,
+)
 from rl_analysis.logging_utils import RunLoggers, collect_system_metrics, write_run_config
 from rl_analysis.networks import build_q_network, network_architecture_dict
 from rl_analysis.replay import ReplayBuffer, Transition, replay_diagnostics, transition_to_batch
@@ -1893,6 +2187,11 @@ class DQNTrainer:
             dqn_config=config.dqn,
             optimizer_config=config.optimizer,
             device=self.device,
+        )
+        self.training_random_action_probabilities = (
+            freeway_up_biased_action_probabilities(action_dim, config.exploration.freeway_up_bias)
+            if config.env.env_id == "ALE/Freeway-v5" and config.exploration.freeway_up_bias > 0.0
+            else None
         )
         self.replay_buffer = (
             ReplayBuffer(
@@ -1947,7 +2246,12 @@ class DQNTrainer:
         with RunLoggers(self.run_dir) as loggers:
             while global_step < self.config.training.total_env_steps:
                 epsilon = self.config.exploration.epsilon_at(global_step)
-                action = self.agent.select_action(obs, epsilon, self.rng)
+                action = self.agent.select_action(
+                    obs,
+                    epsilon,
+                    self.rng,
+                    random_action_probabilities=self.training_random_action_probabilities,
+                )
                 next_obs, reward, terminated, truncated, _info = self.env.step(action)
                 global_step += 1
                 episode_return += float(reward)
