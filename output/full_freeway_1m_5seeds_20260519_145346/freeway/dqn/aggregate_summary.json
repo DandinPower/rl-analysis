@@ -1,0 +1,98 @@
+{
+  "area_under_eval_curve": {
+    "max": 5090250.0,
+    "mean": 3046125.0,
+    "median": 3046125.0,
+    "min": 1002000.0,
+    "std": 2044125.0
+  },
+  "best_eval_return": {
+    "max": 22.35,
+    "mean": 20.200000000000003,
+    "median": 20.200000000000003,
+    "min": 18.05,
+    "std": 2.1500000000000004
+  },
+  "env_id": "ALE/Freeway-v5",
+  "failure_rate": {
+    "early_termination_rate": 0.0,
+    "nan_rate": 0.0,
+    "q_value_explosion_rate": 0.0
+  },
+  "final_eval_return": {
+    "max": 22.3,
+    "mean": 15.4,
+    "median": 15.4,
+    "min": 8.5,
+    "std": 6.9
+  },
+  "freeway": {
+    "final_zero_score_rate": {
+      "max": 0.0,
+      "mean": 0.0,
+      "median": 0.0,
+      "min": 0.0,
+      "std": 0.0
+    },
+    "reference_dqn_score": 30.3,
+    "reference_human_score": 29.6,
+    "reference_random_score": 0.0,
+    "score_threshold_first_steps": {
+      "10.0": {
+        "max": 60000.0,
+        "mean": 35000.0,
+        "median": 35000.0,
+        "min": 10000.0,
+        "std": 25000.0
+      },
+      "15.0": {
+        "max": 60000.0,
+        "mean": 35000.0,
+        "median": 35000.0,
+        "min": 10000.0,
+        "std": 25000.0
+      },
+      "22.5": {
+        "max": null,
+        "mean": null,
+        "median": null,
+        "min": null,
+        "std": null
+      },
+      "5.0": {
+        "max": 60000.0,
+        "mean": 35000.0,
+        "median": 35000.0,
+        "min": 10000.0,
+        "std": 25000.0
+      }
+    },
+    "score_threshold_success_rates": {
+      "10.0": 1.0,
+      "15.0": 1.0,
+      "22.5": 0.0,
+      "5.0": 1.0
+    }
+  },
+  "num_seeds": 2,
+  "seeds": [
+    1,
+    3
+  ],
+  "stability": {
+    "catastrophic_collapse_count_mean": 89.0,
+    "eval_return_across_seed_std_mean": 6.9,
+    "largest_eval_drop_mean": 19.825000000000003
+  },
+  "steps_to_threshold": {
+    "max": 60000.0,
+    "mean": 35000.0,
+    "median": 35000.0,
+    "min": 10000.0,
+    "num_seeds_reached": 2,
+    "std": 25000.0,
+    "success_rate": 1.0,
+    "threshold": 15.0
+  },
+  "variant": "dqn"
+}
