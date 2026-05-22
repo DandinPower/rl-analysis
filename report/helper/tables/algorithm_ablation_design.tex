@@ -1,0 +1,12 @@
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.19\textwidth}>{\centering\arraybackslash}p{0.07\textwidth}>{\centering\arraybackslash}p{0.07\textwidth}>{\centering\arraybackslash}p{0.07\textwidth}>{\centering\arraybackslash}p{0.07\textwidth}Y@{}}
+\toprule
+\textbf{Variant} & \textbf{Target} & \textbf{Replay} & \textbf{Double} & \textbf{Dueling} & \textbf{Design Role and Expected Effect} \\
+\midrule
+DQN & Yes & Yes & No & No & Baseline with replay and a separate target network. Set the reference for learning speed and stability in both tasks. \\
+DQN without target network & No & Yes & No & No & Ablation of the slow-moving bootstrap target. More oscillation and weaker policy retention because the target changes every update. \\
+DQN without replay buffer & Yes & No & No & No & Ablation of decorrelated sampling and transition reuse. Less stable learning from recent correlated data, especially when rewards are sparse. \\
+Double DQN & Yes & Yes & Yes & No & Extension that separates next-action selection from next-action evaluation. Lower overestimation risk and better final reliability than the baseline. \\
+Dueling DQN & Yes & Yes & No & Yes & Extension that predicts state value and action advantages with separate streams. Better value learning when several actions have similar value in the same state. \\
+Double + Dueling DQN & Yes & Yes & Yes & Yes & Combined extension that tests whether the two improvements are complementary. Potentially stronger stability and value estimates, but not guaranteed additive gains. \\
+\bottomrule
+\end{tabularx}

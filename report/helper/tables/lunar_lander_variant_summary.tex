@@ -1,0 +1,14 @@
+\begin{adjustbox}{width=\textwidth}
+\begin{tabular}{@{}lccccccccc@{}}
+\toprule
+\textbf{Variant} & \textbf{Best Eval} & \textbf{Final Eval} & \textbf{Reached 200} & \textbf{Sustained 200} & \textbf{First 200} & \textbf{Final Success} & \textbf{Peak Gap} & \textbf{Largest Drop} & \textbf{Q Spike} \\
+\midrule
+DQN & 260.2 $\pm$ 17.3 & 208.0 $\pm$ 73.7 & 10/10 & 7/10 & 213k & 75.0\% & 52.2 & 251.2 & 10\% \\
+No Target & 259.8 $\pm$ 9.4 & 149.3 $\pm$ 109.9 & 10/10 & 0/10 & 186k & 50.0\% & 110.5 & 292.2 & 100\% \\
+No Replay & 127.6 $\pm$ 53.2 & -260.6 $\pm$ 215.7 & 1/10 & 0/10 & 80k & 1.5\% & 388.2 & 143.3 & 80\% \\
+Double DQN & 267.2 $\pm$ 5.2 & 219.7 $\pm$ 51.7 & 10/10 & 5/10 & 261k & 74.0\% & 47.6 & 224.1 & 20\% \\
+Dueling DQN & 268.3 $\pm$ 10.1 & 205.5 $\pm$ 68.4 & 10/10 & 6/10 & 255k & 69.0\% & 62.8 & 261.4 & 40\% \\
+Double + Dueling & 258.3 $\pm$ 34.3 & 219.8 $\pm$ 79.7 & 9/10 & 9/10 & 261k & 77.5\% & 38.4 & 187.6 & 40\% \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}

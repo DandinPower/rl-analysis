@@ -1,0 +1,3117 @@
+================================================
+FILE: __init__.py
+================================================
+"""Training utilities for the RL analysis project."""
+
+from rl_analysis.config import VARIANT_NAMES, build_run_config, get_env_profile, get_variant_spec
+
+__all__ = [
+    "VARIANT_NAMES",
+    "build_run_config",
+    "get_env_profile",
+    "get_variant_spec",
+]
+
+
+
+================================================
+FILE: agent.py
+================================================
+"""DQN agent implementation."""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import Any
+
+import numpy as np
+import torch
+from torch import nn
+from torch.nn import functional as F
+
+from rl_analysis.config import DQNHyperparameters, OptimizerConfig, VariantSpec
+from rl_analysis.replay import TransitionBatch
+
+
+def _as_tensor(array: np.ndarray, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    return torch.as_tensor(array, dtype=dtype, device=device)
+
+
+def _diagnostic_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    tensor = tensor.detach()
+    if tensor.device.type == "mps":
+        return tensor.float().cpu()
+    return tensor
+
+
+def calculate_dqn_targets(
+    *,
+    online_network: nn.Module,
+    target_network: nn.Module,
+    rewards: torch.Tensor,
+    next_states: torch.Tensor,
+    terminated: torch.Tensor,
+    gamma: float,
+    use_double_dqn: bool,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    with torch.no_grad():
+        target_next_q = target_network(next_states)
+        vanilla_max_target_q = target_next_q.max(dim=1).values
+        if use_double_dqn:
+            online_next_q = online_network(next_states)
+            next_actions = online_next_q.argmax(dim=1, keepdim=True)
+            selected_next_q = target_next_q.gather(1, next_actions).squeeze(1)
+            online_selected_action_q = online_next_q.gather(1, next_actions).squeeze(1)
+        else:
+            online_next_q = online_network(next_states)
+            selected_next_q = vanilla_max_target_q
+            online_selected_action_q = online_next_q.max(dim=1).values
+
+        non_terminal = 1.0 - terminated.float()
+        targets = rewards + gamma * non_terminal * selected_next_q
+        diagnostics = {
+            "online_selected_action_q_mean": float(online_selected_action_q.mean().item()),
+            "target_evaluated_selected_action_q_mean": float(selected_next_q.mean().item()),
+            "target_evaluated_selected_action_q_std": float(selected_next_q.std(unbiased=False).item()),
+            "target_evaluated_selected_action_q_min": float(selected_next_q.min().item()),
+            "target_evaluated_selected_action_q_max": float(selected_next_q.max().item()),
+            "vanilla_max_target_q_mean_proxy": float(vanilla_max_target_q.mean().item()),
+            "double_dqn_target_q_mean": float(selected_next_q.mean().item()) if use_double_dqn else None,
+            "estimated_overestimation_reduction": float((vanilla_max_target_q - selected_next_q).mean().item())
+            if use_double_dqn
+            else None,
+        }
+        return targets, diagnostics
+
+
+class DQNAgent:
+    def __init__(
+        self,
+        *,
+        online_network: nn.Module,
+        target_network: nn.Module | None,
+        variant: VariantSpec,
+        dqn_config: DQNHyperparameters,
+        optimizer_config: OptimizerConfig,
+        device: torch.device,
+    ):
+        self.online_network = online_network.to(device)
+        self.target_network = target_network.to(device) if target_network is not None else None
+        self.variant = variant
+        self.dqn_config = dqn_config
+        self.optimizer_config = optimizer_config
+        self.device = device
+        self.optimizer = torch.optim.Adam(
+            self.online_network.parameters(),
+            lr=optimizer_config.learning_rate,
+            eps=optimizer_config.epsilon,
+            weight_decay=optimizer_config.weight_decay,
+        )
+        self.update_index = 0
+        self.target_update_count = 0
+        self.last_target_update_step = 0
+        if self.target_network is not None:
+            self.hard_update_target()
+
+    def select_action(
+        self,
+        observation: np.ndarray,
+        epsilon: float,
+        rng: np.random.Generator,
+        random_action_probabilities: np.ndarray | None = None,
+    ) -> int:
+        if rng.random() < epsilon:
+            if random_action_probabilities is not None:
+                return int(rng.choice(self.action_dim, p=random_action_probabilities))
+            return int(rng.integers(self.action_dim))
+        obs_tensor = torch.as_tensor(observation, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.online_network(obs_tensor)
+        return int(torch.argmax(q_values, dim=1).item())
+
+    @property
+    def action_dim(self) -> int:
+        return int(getattr(self.online_network, "action_dim"))
+
+    def hard_update_target(self, global_env_step: int = 0) -> None:
+        if self.target_network is None:
+            return
+        self.target_network.load_state_dict(self.online_network.state_dict())
+        self.target_update_count += 1
+        self.last_target_update_step = global_env_step
+
+    def maybe_update_target(self, global_env_step: int) -> bool:
+        if self.target_network is None:
+            return False
+        frequency = self.dqn_config.target_update_frequency_env_steps
+        if frequency <= 0 or global_env_step <= 0 or global_env_step % frequency != 0:
+            return False
+        tau = self.dqn_config.target_update_tau
+        if tau >= 1.0:
+            self.hard_update_target(global_env_step)
+        else:
+            with torch.no_grad():
+                for target_param, online_param in zip(
+                    self.target_network.parameters(), self.online_network.parameters(), strict=True
+                ):
+                    target_param.data.mul_(1.0 - tau).add_(online_param.data, alpha=tau)
+            self.target_update_count += 1
+            self.last_target_update_step = global_env_step
+        return True
+
+    def target_parameter_distance(self) -> tuple[float | None, float | None]:
+        if self.target_network is None:
+            return None, None
+        sq_sum = 0.0
+        count = 0
+        with torch.no_grad():
+            for online_param, target_param in zip(
+                self.online_network.parameters(), self.target_network.parameters(), strict=True
+            ):
+                diff = (online_param - target_param).detach()
+                sq_sum += float(torch.sum(diff * diff).item())
+                count += diff.numel()
+        l2 = math.sqrt(sq_sum)
+        mean_per_param = l2 / max(1, count)
+        return l2, mean_per_param
+
+    def update(self, batch: TransitionBatch, global_env_step: int) -> dict[str, Any]:
+        start = time.perf_counter()
+        states = _as_tensor(batch.states, self.device, torch.float32)
+        actions = _as_tensor(batch.actions, self.device, torch.int64)
+        rewards = _as_tensor(batch.rewards, self.device, torch.float32)
+        next_states = _as_tensor(batch.next_states, self.device, torch.float32)
+        terminated = _as_tensor(batch.terminated.astype(np.float32), self.device, torch.float32)
+
+        target_network = self.target_network if self.target_network is not None else self.online_network
+        targets, double_dqn_diag = calculate_dqn_targets(
+            online_network=self.online_network,
+            target_network=target_network,
+            rewards=rewards,
+            next_states=next_states,
+            terminated=terminated,
+            gamma=self.dqn_config.gamma,
+            use_double_dqn=self.variant.use_double_dqn,
+        )
+
+        q_values, streams = self.online_network(states, return_streams=True)
+        chosen_q = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
+        td_errors = targets - chosen_q
+        per_sample_loss = F.smooth_l1_loss(chosen_q, targets, reduction="none")
+        loss = per_sample_loss.mean()
+
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        grad_norm_before = torch.nn.utils.clip_grad_norm_(
+            self.online_network.parameters(), self.dqn_config.max_grad_norm
+        )
+        self.optimizer.step()
+        self.update_index += 1
+
+        grad_norm_after = self._grad_norm()
+        param_norm = self._param_norm()
+        top2 = torch.topk(q_values.detach(), k=min(2, q_values.shape[1]), dim=1).values
+        action_gap = top2[:, 0] - top2[:, 1] if top2.shape[1] > 1 else torch.zeros_like(top2[:, 0])
+        target_param_l2, target_param_l2_mean = self.target_parameter_distance()
+
+        td_abs = torch.abs(td_errors.detach())
+        td_abs_stats = _diagnostic_tensor(td_abs)
+        target_q_mean = double_dqn_diag["target_evaluated_selected_action_q_mean"]
+        online_q_max_mean = float(q_values.detach().max(dim=1).values.mean().item())
+        metrics = {
+            "global_env_step": global_env_step,
+            "update_index": self.update_index,
+            "loss": {
+                "td_loss_mean": float(loss.detach().item()),
+                "td_loss_std": float(per_sample_loss.detach().std(unbiased=False).item()),
+                "td_error_mean": float(td_errors.detach().mean().item()),
+                "td_error_abs_mean": float(td_abs_stats.mean().item()),
+                "td_error_abs_median": float(torch.median(td_abs_stats).item()),
+                "td_error_abs_p90": float(torch.quantile(td_abs_stats, 0.90).item()),
+                "td_error_abs_p95": float(torch.quantile(td_abs_stats, 0.95).item()),
+                "td_error_abs_p99": float(torch.quantile(td_abs_stats, 0.99).item()),
+            },
+            "q_values": {
+                "online_q_mean": float(q_values.detach().mean().item()),
+                "online_q_std": float(q_values.detach().std(unbiased=False).item()),
+                "online_q_min": float(q_values.detach().min().item()),
+                "online_q_max": float(q_values.detach().max().item()),
+                "online_q_max_mean": online_q_max_mean,
+                "target_q_mean": target_q_mean,
+                "target_q_std": double_dqn_diag["target_evaluated_selected_action_q_std"],
+                "target_q_min": double_dqn_diag["target_evaluated_selected_action_q_min"],
+                "target_q_max": double_dqn_diag["target_evaluated_selected_action_q_max"],
+                "q_overestimation_proxy": float(online_q_max_mean - target_q_mean),
+                "action_gap_mean": float(action_gap.mean().item()),
+                "action_gap_std": float(action_gap.std(unbiased=False).item()),
+            },
+            "targets": {
+                "bellman_target_mean": float(targets.detach().mean().item()),
+                "bellman_target_std": float(targets.detach().std(unbiased=False).item()),
+                "bellman_target_min": float(targets.detach().min().item()),
+                "bellman_target_max": float(targets.detach().max().item()),
+                "reward_mean": float(rewards.mean().item()),
+                "reward_std": float(rewards.std(unbiased=False).item()),
+                "done_fraction": float(np.mean(batch.done_for_logging)),
+            },
+            "optimization": {
+                "learning_rate": self.optimizer_config.learning_rate,
+                "grad_norm": float(grad_norm_after),
+                "grad_norm_before_clip": float(grad_norm_before.item()),
+                "grad_norm_after_clip": float(grad_norm_after),
+                "grad_norm_clipped": bool(float(grad_norm_before.item()) > self.dqn_config.max_grad_norm),
+                "param_norm": float(param_norm),
+                "update_wall_time_sec": time.perf_counter() - start,
+            },
+            "target_network": {
+                "enabled": self.target_network is not None,
+                "target_update_count": self.target_update_count if self.target_network is not None else None,
+                "steps_since_target_update": global_env_step - self.last_target_update_step
+                if self.target_network is not None
+                else None,
+                "target_update_frequency_env_steps": self.dqn_config.target_update_frequency_env_steps
+                if self.target_network is not None
+                else None,
+                "target_update_tau": self.dqn_config.target_update_tau if self.target_network is not None else None,
+                "online_target_param_l2": target_param_l2,
+                "online_target_param_l2_mean_per_param": target_param_l2_mean,
+            },
+            "double_dqn": {
+                "enabled": self.variant.use_double_dqn,
+                **double_dqn_diag,
+            },
+            "dueling": self._dueling_metrics(streams, action_gap),
+            "failure_diagnostics": self._failure_diagnostics(loss, q_values, grad_norm_before),
+        }
+        return metrics
+
+    def _dueling_metrics(self, streams: dict[str, torch.Tensor | None], action_gap: torch.Tensor) -> dict[str, Any]:
+        if not self.variant.use_dueling_network:
+            return {
+                "enabled": False,
+                "value_stream_mean": None,
+                "value_stream_std": None,
+                "advantage_stream_mean": None,
+                "advantage_stream_std": None,
+                "advantage_abs_mean": None,
+                "advantage_max_mean": None,
+                "advantage_min_mean": None,
+                "action_gap_mean": None,
+                "action_gap_std": None,
+            }
+        value = streams["value"].detach()
+        advantage = streams["advantage"].detach()
+        return {
+            "enabled": True,
+            "value_stream_mean": float(value.mean().item()),
+            "value_stream_std": float(value.std(unbiased=False).item()),
+            "advantage_stream_mean": float(advantage.mean().item()),
+            "advantage_stream_std": float(advantage.std(unbiased=False).item()),
+            "advantage_abs_mean": float(torch.abs(advantage).mean().item()),
+            "advantage_max_mean": float(advantage.max(dim=1).values.mean().item()),
+            "advantage_min_mean": float(advantage.min(dim=1).values.mean().item()),
+            "action_gap_mean": float(action_gap.mean().item()),
+            "action_gap_std": float(action_gap.std(unbiased=False).item()),
+        }
+
+    def _grad_norm(self) -> float:
+        sq_sum = 0.0
+        for param in self.online_network.parameters():
+            if param.grad is not None:
+                sq_sum += float(torch.sum(param.grad.detach() * param.grad.detach()).item())
+        return math.sqrt(sq_sum)
+
+    def _param_norm(self) -> float:
+        sq_sum = 0.0
+        with torch.no_grad():
+            for param in self.online_network.parameters():
+                sq_sum += float(torch.sum(param * param).item())
+        return math.sqrt(sq_sum)
+
+    def _failure_diagnostics(
+        self, loss: torch.Tensor, q_values: torch.Tensor, grad_norm_before: torch.Tensor
+    ) -> dict[str, Any]:
+        q_abs_max = float(torch.max(torch.abs(q_values.detach())).item())
+        loss_value = float(loss.detach().item())
+        grad_value = float(grad_norm_before.item())
+        return {
+            "nan_detected": bool(torch.isnan(loss).item() or torch.isnan(q_values).any().item()),
+            "inf_detected": bool(torch.isinf(loss).item() or torch.isinf(q_values).any().item()),
+            "q_value_explosion": bool(q_abs_max > 1000.0),
+            "q_value_explosion_threshold": 1000.0,
+            "loss_explosion": bool(loss_value > 1000.0),
+            "loss_explosion_threshold": 1000.0,
+            "gradient_explosion": bool(grad_value > 100.0),
+            "gradient_explosion_threshold": 100.0,
+            "early_terminated": False,
+            "early_terminated_reason": None,
+        }
+
+
+
+================================================
+FILE: aggregate.py
+================================================
+"""Aggregate completed experiment runs."""
+
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+from rl_analysis.config import VARIANT_NAMES, get_env_profile
+from rl_analysis.utils import read_jsonl, write_json
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Aggregate DQN experiment summaries.")
+    parser.add_argument("--env", default="LunarLander-v3")
+    parser.add_argument("--output-root", default="output")
+    return parser.parse_args()
+
+
+def _latest_seed_runs(variant_dir: Path) -> list[Path]:
+    runs = []
+    for seed_dir in sorted(variant_dir.glob("seed_*")):
+        candidates = [
+            run_dir
+            for run_dir in sorted(seed_dir.iterdir())
+            if run_dir.is_dir() and (run_dir / "summary.json").exists()
+        ]
+        if not candidates:
+            continue
+        runs.append(max(candidates, key=lambda path: path.stat().st_mtime))
+    return runs
+
+
+def _load_summary(path: Path) -> dict[str, Any]:
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _stats(values: list[float]) -> dict[str, float | None]:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return {"mean": None, "std": None, "min": None, "max": None, "median": None}
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "median": float(np.median(arr)),
+    }
+
+
+def aggregate_variant(env_slug: str, variant: str, output_root: Path) -> dict[str, Any] | None:
+    variant_dir = output_root / env_slug / variant
+    run_dirs = _latest_seed_runs(variant_dir)
+    summaries = [_load_summary(run_dir / "summary.json") for run_dir in run_dirs]
+    summaries = [summary for summary in summaries if summary.get("training_completed")]
+    if not summaries:
+        return None
+
+    seeds = [int(summary["seed"]) for summary in summaries]
+    final_eval = [
+        summary["performance"]["final_eval_return_mean"]
+        for summary in summaries
+        if summary["performance"]["final_eval_return_mean"] is not None
+    ]
+    best_eval = [
+        summary["performance"]["best_eval_return_mean"]
+        for summary in summaries
+        if summary["performance"]["best_eval_return_mean"] is not None
+    ]
+    auc = [
+        summary["performance"]["area_under_eval_curve"]
+        for summary in summaries
+        if summary["performance"]["area_under_eval_curve"] is not None
+    ]
+    reached_steps = [
+        summary["sample_efficiency"]["first_step_reaching_threshold"]
+        for summary in summaries
+        if summary["sample_efficiency"]["first_step_reaching_threshold"] is not None
+    ]
+    collapse_counts = [summary["stability"]["catastrophic_collapse_count"] for summary in summaries]
+    largest_drops = [
+        summary["stability"]["largest_eval_drop"]
+        for summary in summaries
+        if summary["stability"]["largest_eval_drop"] is not None
+    ]
+
+    aggregate = {
+        "env_id": summaries[0]["env_id"],
+        "variant": variant,
+        "num_seeds": len(seeds),
+        "seeds": sorted(seeds),
+        "final_eval_return": _stats(final_eval),
+        "best_eval_return": _stats(best_eval),
+        "area_under_eval_curve": _stats(auc),
+        "steps_to_threshold": {
+            "threshold": summaries[0]["sample_efficiency"]["threshold"],
+            **_stats([float(x) for x in reached_steps]),
+            "success_rate": float(len(reached_steps) / len(summaries)),
+            "num_seeds_reached": len(reached_steps),
+        },
+        "stability": {
+            "catastrophic_collapse_count_mean": float(np.mean(collapse_counts)) if collapse_counts else None,
+            "largest_eval_drop_mean": float(np.mean(largest_drops)) if largest_drops else None,
+            "eval_return_across_seed_std_mean": float(np.std(final_eval)) if final_eval else None,
+        },
+        "failure_rate": {
+            "nan_rate": float(np.mean([summary["failure_diagnostics"]["nan_detected"] for summary in summaries])),
+            "q_value_explosion_rate": float(
+                np.mean([summary["failure_diagnostics"]["q_value_explosion"] for summary in summaries])
+            ),
+            "early_termination_rate": float(
+                np.mean([summary["failure_diagnostics"]["early_terminated"] for summary in summaries])
+            ),
+        },
+    }
+    if summaries[0]["env_id"] == "ALE/Freeway-v5":
+        aggregate["freeway"] = _aggregate_freeway(summaries)
+    write_json(variant_dir / "aggregate_summary.json", aggregate)
+    return aggregate
+
+
+def _aggregate_freeway(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    final_zero_score_rates = [
+        summary.get("freeway", {}).get("final_zero_score_rate")
+        for summary in summaries
+        if summary.get("freeway", {}).get("final_zero_score_rate") is not None
+    ]
+    thresholds = summaries[0].get("freeway", {}).get("score_thresholds", [])
+    threshold_success_rates = {}
+    threshold_first_steps = {}
+    for threshold in thresholds:
+        key = str(threshold)
+        reached = [
+            summary.get("freeway", {}).get("first_step_reaching_score_thresholds", {}).get(key)
+            for summary in summaries
+        ]
+        reached_steps = [float(step) for step in reached if step is not None]
+        threshold_success_rates[key] = float(len(reached_steps) / len(summaries))
+        threshold_first_steps[key] = _stats(reached_steps)
+    return {
+        "final_zero_score_rate": _stats([float(value) for value in final_zero_score_rates]),
+        "score_threshold_success_rates": threshold_success_rates,
+        "score_threshold_first_steps": threshold_first_steps,
+        "reference_random_score": summaries[0].get("freeway", {}).get("reference_random_score"),
+        "reference_human_score": summaries[0].get("freeway", {}).get("reference_human_score"),
+        "reference_dqn_score": summaries[0].get("freeway", {}).get("reference_dqn_score"),
+    }
+
+
+def plot_learning_curves(env_slug: str, output_root: Path) -> None:
+    plot_dir = output_root / env_slug / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    plotted_any = False
+    plt.figure(figsize=(8, 5))
+    for variant in VARIANT_NAMES:
+        variant_dir = output_root / env_slug / variant
+        run_dirs = _latest_seed_runs(variant_dir)
+        curves: dict[int, list[float]] = defaultdict(list)
+        for run_dir in run_dirs:
+            for row in read_jsonl(run_dir / "eval_metrics.jsonl"):
+                if row.get("return_mean") is not None:
+                    curves[int(row["global_env_step"])].append(float(row["return_mean"]))
+        if not curves:
+            continue
+        steps = sorted(curves)
+        means = [float(np.mean(curves[step])) for step in steps]
+        plt.plot(steps, means, label=variant)
+        plotted_any = True
+    if plotted_any:
+        plt.xlabel("Environment steps")
+        plt.ylabel("Mean evaluation return")
+        plt.title(f"{env_slug} DQN ablations")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(plot_dir / "eval_learning_curves.png", dpi=160)
+    plt.close()
+
+
+def main() -> None:
+    args = parse_args()
+    profile = get_env_profile(args.env)
+    output_root = Path(args.output_root)
+    written = []
+    for variant in VARIANT_NAMES:
+        aggregate = aggregate_variant(profile.slug, variant, output_root)
+        if aggregate is not None:
+            written.append(variant)
+    plot_learning_curves(profile.slug, output_root)
+    if written:
+        print(f"Aggregated variants: {', '.join(written)}")
+    else:
+        print(f"No completed runs found under {output_root / profile.slug}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
+FILE: config.py
+================================================
+"""Dataclass configuration for DQN experiments."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+@dataclass(frozen=True)
+class VariantSpec:
+    name: str
+    label: str
+    use_target_network: bool
+    use_replay_buffer: bool
+    use_double_dqn: bool
+    use_dueling_network: bool
+    use_prioritized_replay: bool = False
+    use_noisy_network: bool = False
+    use_reward_clipping: bool = False
+
+
+VARIANTS: dict[str, VariantSpec] = {
+    "dqn": VariantSpec(
+        name="dqn",
+        label="DQN",
+        use_target_network=True,
+        use_replay_buffer=True,
+        use_double_dqn=False,
+        use_dueling_network=False,
+    ),
+    "dqn_no_target": VariantSpec(
+        name="dqn_no_target",
+        label="DQN without target network",
+        use_target_network=False,
+        use_replay_buffer=True,
+        use_double_dqn=False,
+        use_dueling_network=False,
+    ),
+    "dqn_no_replay": VariantSpec(
+        name="dqn_no_replay",
+        label="DQN without replay buffer",
+        use_target_network=True,
+        use_replay_buffer=False,
+        use_double_dqn=False,
+        use_dueling_network=False,
+    ),
+    "double_dqn": VariantSpec(
+        name="double_dqn",
+        label="Double DQN",
+        use_target_network=True,
+        use_replay_buffer=True,
+        use_double_dqn=True,
+        use_dueling_network=False,
+    ),
+    "dueling_dqn": VariantSpec(
+        name="dueling_dqn",
+        label="Dueling DQN",
+        use_target_network=True,
+        use_replay_buffer=True,
+        use_double_dqn=False,
+        use_dueling_network=True,
+    ),
+    "double_dueling_dqn": VariantSpec(
+        name="double_dueling_dqn",
+        label="Double DQN + Dueling DQN",
+        use_target_network=True,
+        use_replay_buffer=True,
+        use_double_dqn=True,
+        use_dueling_network=True,
+    ),
+}
+
+VARIANT_NAMES = tuple(VARIANTS.keys())
+
+
+@dataclass(frozen=True)
+class EnvironmentProfile:
+    env_id: str
+    slug: str
+    observation_type: str
+    action_space_type: str
+    network_architecture: str
+    success_threshold: float | None
+    reward_clipping: bool = False
+    raw_frame_skip: int | None = None
+    repeat_action_probability: float | None = None
+    full_action_space: bool | None = None
+    frame_skip: int | None = None
+    frame_stack: int | None = None
+    grayscale: bool | None = None
+    resize_shape: tuple[int, int] | None = None
+    noop_max: int | None = None
+    terminal_on_life_loss: bool | None = None
+    max_episode_steps: int | None = None
+    score_thresholds: tuple[float, ...] = ()
+    reference_random_score: float | None = None
+    reference_human_score: float | None = None
+    reference_dqn_score: float | None = None
+
+
+ENV_PROFILES: dict[str, EnvironmentProfile] = {
+    "LunarLander-v3": EnvironmentProfile(
+        env_id="LunarLander-v3",
+        slug="lunarlander_v3",
+        observation_type="vector",
+        action_space_type="discrete",
+        network_architecture="mlp",
+        success_threshold=200.0,
+        reward_clipping=False,
+    ),
+    "ALE/Freeway-v5": EnvironmentProfile(
+        env_id="ALE/Freeway-v5",
+        slug="freeway",
+        observation_type="image",
+        action_space_type="discrete",
+        network_architecture="cnn",
+        success_threshold=15.0,
+        reward_clipping=True,
+        raw_frame_skip=1,
+        repeat_action_probability=0.25,
+        full_action_space=False,
+        frame_skip=4,
+        frame_stack=4,
+        grayscale=True,
+        resize_shape=(84, 84),
+        noop_max=30,
+        terminal_on_life_loss=False,
+        score_thresholds=(5.0, 10.0, 15.0, 22.5),
+        reference_random_score=0.0,
+        reference_human_score=29.6,
+        reference_dqn_score=30.3,
+    ),
+}
+
+ENV_ALIASES = {
+    "lunarlander": "LunarLander-v3",
+    "lunarlander-v3": "LunarLander-v3",
+    "lunarlander_v3": "LunarLander-v3",
+    "freeway": "ALE/Freeway-v5",
+    "atari_freeway": "ALE/Freeway-v5",
+    "ale/freeway-v5": "ALE/Freeway-v5",
+}
+
+
+@dataclass
+class TrainingConfig:
+    total_env_steps: int = 500_000
+    max_episodes: int | None = None
+    num_seeds: int = 5
+    eval_frequency_env_steps: int = 10_000
+    checkpoint_frequency_env_steps: int = 50_000
+    num_eval_episodes: int = 20
+    update_log_frequency: int = 100
+    system_metrics_frequency_env_steps: int = 10_000
+    sustained_threshold_window: int = 5
+    device: str = "auto"
+
+
+@dataclass
+class OptimizerConfig:
+    name: str = "Adam"
+    learning_rate: float = 5e-4
+    epsilon: float = 1e-8
+    weight_decay: float = 0.0
+    gradient_clip_norm: float = 10.0
+
+
+@dataclass
+class DQNHyperparameters:
+    gamma: float = 0.99
+    batch_size: int = 64
+    replay_buffer_size: int = 100_000
+    learning_starts: int = 5_000
+    train_frequency_env_steps: int = 4
+    gradient_steps_per_train: int = 1
+    target_update_frequency_env_steps: int = 1_000
+    target_update_tau: float = 1.0
+    max_grad_norm: float = 10.0
+
+
+@dataclass
+class ExplorationConfig:
+    type: str = "epsilon_greedy"
+    epsilon_start: float = 1.0
+    epsilon_final: float = 0.05
+    epsilon_decay_env_steps: int = 100_000
+    eval_epsilon: float = 0.001
+    freeway_up_bias: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.freeway_up_bias <= 1.0:
+            raise ValueError("freeway_up_bias must be between 0.0 and 1.0.")
+
+    def epsilon_at(self, env_step: int) -> float:
+        if self.epsilon_decay_env_steps <= 0:
+            return self.epsilon_final
+        fraction = min(1.0, max(0.0, env_step / self.epsilon_decay_env_steps))
+        return self.epsilon_start + fraction * (self.epsilon_final - self.epsilon_start)
+
+
+@dataclass
+class NetworkConfig:
+    architecture: str = "mlp"
+    hidden_layers: list[int] = field(default_factory=lambda: [128, 128])
+    activation: str = "relu"
+    dueling_aggregation: str | None = None
+    conv_layers: list[dict[str, int]] = field(
+        default_factory=lambda: [
+            {"out_channels": 32, "kernel_size": 8, "stride": 4},
+            {"out_channels": 64, "kernel_size": 4, "stride": 2},
+            {"out_channels": 64, "kernel_size": 3, "stride": 1},
+        ]
+    )
+    fully_connected_layers: list[int] = field(default_factory=lambda: [512])
+    num_parameters: int | None = None
+    initializer: str = "orthogonal"
+
+
+@dataclass
+class RunConfig:
+    run_id: str
+    experiment_group: str
+    env: EnvironmentProfile
+    variant: VariantSpec
+    seed: int
+    output_root: Path
+    run_dir: Path
+    datetime_start: str
+    datetime_end: str | None
+    status: str
+    training: TrainingConfig
+    optimizer: OptimizerConfig
+    dqn: DQNHyperparameters
+    exploration: ExplorationConfig
+    network: NetworkConfig
+
+
+def get_variant_spec(name: str) -> VariantSpec:
+    key = name.strip().lower()
+    if key not in VARIANTS:
+        allowed = ", ".join(VARIANT_NAMES)
+        raise ValueError(f"Unknown variant {name!r}. Expected one of: {allowed}.")
+    return VARIANTS[key]
+
+
+def get_env_profile(env_id: str) -> EnvironmentProfile:
+    normalized = env_id.strip()
+    canonical = ENV_ALIASES.get(normalized.lower(), normalized)
+    if canonical not in ENV_PROFILES:
+        allowed = ", ".join(ENV_PROFILES)
+        raise ValueError(f"Unknown environment {env_id!r}. Expected one of: {allowed}.")
+    return ENV_PROFILES[canonical]
+
+
+def default_training_for_env(env: EnvironmentProfile) -> TrainingConfig:
+    if env.env_id == "ALE/Freeway-v5":
+        return TrainingConfig(total_env_steps=1_000_000)
+    return TrainingConfig()
+
+
+def default_dqn_for_variant(variant: VariantSpec, env: EnvironmentProfile | None = None) -> DQNHyperparameters:
+    dqn = DQNHyperparameters()
+    if env is not None and env.env_id == "ALE/Freeway-v5":
+        dqn = replace(
+            dqn,
+            batch_size=32,
+            replay_buffer_size=25_000,
+            learning_starts=20_000,
+            train_frequency_env_steps=4,
+            target_update_frequency_env_steps=8_000,
+        )
+    if not variant.use_replay_buffer:
+        dqn = replace(
+            dqn,
+            batch_size=1,
+            replay_buffer_size=0,
+            learning_starts=0,
+            train_frequency_env_steps=1,
+            gradient_steps_per_train=1,
+        )
+    return dqn
+
+
+def default_exploration_for_env(env: EnvironmentProfile) -> ExplorationConfig:
+    if env.env_id == "ALE/Freeway-v5":
+        return ExplorationConfig(epsilon_final=0.01, epsilon_decay_env_steps=250_000)
+    return ExplorationConfig()
+
+
+def default_optimizer_for_env(env: EnvironmentProfile) -> OptimizerConfig:
+    if env.env_id == "ALE/Freeway-v5":
+        return OptimizerConfig(learning_rate=6.25e-5, epsilon=1.5e-4)
+    return OptimizerConfig()
+
+
+def default_network_for_env(env: EnvironmentProfile, variant: VariantSpec) -> NetworkConfig:
+    if env.network_architecture == "cnn":
+        return NetworkConfig(
+            architecture="cnn",
+            hidden_layers=[],
+            dueling_aggregation="mean_subtraction" if variant.use_dueling_network else None,
+        )
+    return NetworkConfig(
+        architecture="mlp",
+        hidden_layers=[128, 128],
+        dueling_aggregation="mean_subtraction" if variant.use_dueling_network else None,
+    )
+
+
+def build_run_config(
+    *,
+    env_id: str,
+    variant_name: str,
+    seed: int,
+    output_root: str | Path = "output",
+    run_id: str | None = None,
+    training_overrides: dict[str, Any] | None = None,
+    dqn_overrides: dict[str, Any] | None = None,
+    exploration_overrides: dict[str, Any] | None = None,
+    network_overrides: dict[str, Any] | None = None,
+    optimizer_overrides: dict[str, Any] | None = None,
+) -> RunConfig:
+    env = get_env_profile(env_id)
+    variant = get_variant_spec(variant_name)
+    output_root_path = Path(output_root)
+    resolved_run_id = run_id or f"{env.slug}_{variant.name}_seed{seed}_{_utc_timestamp()}"
+    run_dir = output_root_path / env.slug / variant.name / f"seed_{seed}" / resolved_run_id
+
+    training = default_training_for_env(env)
+    dqn = default_dqn_for_variant(variant, env)
+    exploration = default_exploration_for_env(env)
+    network = default_network_for_env(env, variant)
+    optimizer = default_optimizer_for_env(env)
+
+    if training_overrides:
+        training = replace(training, **training_overrides)
+    if dqn_overrides:
+        dqn = replace(dqn, **dqn_overrides)
+    if exploration_overrides:
+        exploration = replace(exploration, **exploration_overrides)
+    if env.env_id != "ALE/Freeway-v5" and exploration.freeway_up_bias != 0.0:
+        raise ValueError("freeway_up_bias can only be used with ALE/Freeway-v5.")
+    if network_overrides:
+        network = replace(network, **network_overrides)
+    if optimizer_overrides:
+        optimizer = replace(optimizer, **optimizer_overrides)
+
+    now = datetime.now(timezone.utc).isoformat()
+    return RunConfig(
+        run_id=resolved_run_id,
+        experiment_group="dqn_ablation_lunarlander_freeway",
+        env=env,
+        variant=variant,
+        seed=seed,
+        output_root=output_root_path,
+        run_dir=run_dir,
+        datetime_start=now,
+        datetime_end=None,
+        status="created",
+        training=training,
+        optimizer=optimizer,
+        dqn=dqn,
+        exploration=exploration,
+        network=network,
+    )
+
+
+
+================================================
+FILE: demo.py
+================================================
+"""Run recorded demos from trained DQN checkpoints."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from gymnasium.wrappers import RecordVideo
+from torch import nn
+
+from rl_analysis.config import NetworkConfig, get_variant_spec
+from rl_analysis.envs import make_env
+from rl_analysis.networks import build_q_network
+from rl_analysis.utils import resolve_device
+
+
+REQUIRED_CHECKPOINT_KEYS = (
+    "config",
+    "online_network_state_dict",
+    "run_id",
+    "variant",
+    "seed",
+)
+
+
+@dataclass(frozen=True)
+class DemoResult:
+    checkpoint_path: Path
+    env_id: str
+    run_id: str
+    variant: str
+    seed: int
+    global_env_step: int | None
+    episode_returns: list[float]
+    episode_lengths: list[int]
+    video_paths: list[Path]
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a recorded policy demo from a DQN checkpoint.")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="Path to a model_step_*.pt checkpoint.")
+    parser.add_argument("--episodes", type=_positive_int, default=1, help="Number of episodes to record.")
+    parser.add_argument("--video-dir", type=Path, default=Path("output/demos"), help="Directory for MP4 output.")
+    parser.add_argument("--device", default="auto", help="Torch device: auto, cpu, cuda, cuda:N, or mps.")
+    return parser.parse_args(argv)
+
+
+def validate_checkpoint_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Checkpoint payload must be a dictionary.")
+
+    missing = [key for key in REQUIRED_CHECKPOINT_KEYS if key not in payload]
+    if missing:
+        raise ValueError(f"Checkpoint payload is missing required key(s): {', '.join(missing)}.")
+
+    config = payload["config"]
+    if not isinstance(config, dict):
+        raise ValueError("Checkpoint config must be a dictionary.")
+
+    env_config = config.get("env")
+    if not isinstance(env_config, dict) or not env_config.get("env_id"):
+        raise ValueError("Checkpoint config must include config.env.env_id.")
+
+    network_config = config.get("network")
+    if not isinstance(network_config, dict):
+        raise ValueError("Checkpoint config must include config.network.")
+
+    if not isinstance(payload["online_network_state_dict"], dict):
+        raise ValueError("Checkpoint online_network_state_dict must be a state-dict dictionary.")
+
+    get_variant_spec(str(payload["variant"]))
+    return payload
+
+
+def load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
+    resolved_path = checkpoint_path.expanduser()
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Checkpoint does not exist: {resolved_path}")
+    payload = torch.load(resolved_path, map_location="cpu", weights_only=False)
+    return validate_checkpoint_payload(payload)
+
+
+def network_config_from_checkpoint(payload: dict[str, Any]) -> NetworkConfig:
+    validate_checkpoint_payload(payload)
+    allowed_fields = set(NetworkConfig.__dataclass_fields__)
+    raw_config = payload["config"]["network"]
+    return NetworkConfig(**{key: value for key, value in raw_config.items() if key in allowed_fields})
+
+
+def env_id_from_checkpoint(payload: dict[str, Any]) -> str:
+    validate_checkpoint_payload(payload)
+    return str(payload["config"]["env"]["env_id"])
+
+
+def build_network_from_checkpoint(
+    payload: dict[str, Any],
+    observation_shape: tuple[int, ...],
+    action_dim: int,
+    device: torch.device,
+) -> nn.Module:
+    network = build_q_network(observation_shape, action_dim, network_config_from_checkpoint(payload))
+    network.load_state_dict(payload["online_network_state_dict"])
+    network.to(device)
+    network.eval()
+    return network
+
+
+def select_greedy_action(network: nn.Module, observation: np.ndarray, device: torch.device) -> int:
+    obs_tensor = torch.as_tensor(np.asarray(observation), dtype=torch.float32, device=device).unsqueeze(0)
+    with torch.no_grad():
+        q_values = network(obs_tensor)
+    return int(torch.argmax(q_values, dim=1).item())
+
+
+def run_demo_episode(env, network: nn.Module, device: torch.device, *, seed: int) -> tuple[float, int]:
+    observation, _info = env.reset(seed=seed)
+    done = False
+    episode_return = 0.0
+    episode_length = 0
+    while not done:
+        action = select_greedy_action(network, observation, device)
+        observation, reward, terminated, truncated, _info = env.step(action)
+        episode_return += float(reward)
+        episode_length += 1
+        done = bool(terminated or truncated)
+    return episode_return, episode_length
+
+
+def _safe_name(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
+    return safe[:80] or "checkpoint"
+
+
+def run_demo(
+    *,
+    checkpoint_path: Path,
+    episodes: int,
+    video_dir: Path,
+    device_name: str,
+) -> DemoResult:
+    payload = load_checkpoint_payload(checkpoint_path)
+    env_id = env_id_from_checkpoint(payload)
+    run_id = str(payload["run_id"])
+    variant = str(payload["variant"])
+    seed = int(payload["seed"])
+    global_env_step = payload.get("global_env_step")
+    if global_env_step is not None:
+        global_env_step = int(global_env_step)
+
+    device = resolve_device(device_name)
+    video_dir = video_dir.expanduser()
+    video_dir.mkdir(parents=True, exist_ok=True)
+    existing_videos = set(video_dir.glob("*.mp4"))
+
+    env = None
+    episode_returns: list[float] = []
+    episode_lengths: list[int] = []
+    try:
+        env = make_env(env_id, seed=seed, render_mode="rgb_array")
+        env = RecordVideo(
+            env,
+            video_folder=str(video_dir),
+            episode_trigger=lambda _episode_id: True,
+            name_prefix=f"{_safe_name(run_id)}-demo",
+            disable_logger=True,
+        )
+        observation_shape = tuple(int(dim) for dim in env.observation_space.shape)
+        action_dim = int(env.action_space.n)
+        network = build_network_from_checkpoint(payload, observation_shape, action_dim, device)
+
+        for episode_index in range(episodes):
+            episode_return, episode_length = run_demo_episode(
+                env,
+                network,
+                device,
+                seed=seed + 200_000 + episode_index,
+            )
+            episode_returns.append(episode_return)
+            episode_lengths.append(episode_length)
+    finally:
+        if env is not None:
+            env.close()
+
+    video_paths = sorted(path for path in video_dir.glob("*.mp4") if path not in existing_videos)
+    return DemoResult(
+        checkpoint_path=checkpoint_path.expanduser(),
+        env_id=env_id,
+        run_id=run_id,
+        variant=variant,
+        seed=seed,
+        global_env_step=global_env_step,
+        episode_returns=episode_returns,
+        episode_lengths=episode_lengths,
+        video_paths=video_paths,
+    )
+
+
+def print_summary(result: DemoResult) -> None:
+    print(f"Checkpoint: {result.checkpoint_path}")
+    print(f"Run: {result.run_id} ({result.env_id}, {result.variant}, seed={result.seed})")
+    if result.global_env_step is not None:
+        print(f"Checkpoint step: {result.global_env_step}")
+    print(f"Episode returns: {result.episode_returns}")
+    print(f"Episode lengths: {result.episode_lengths}")
+    if result.video_paths:
+        print("Videos:")
+        for path in result.video_paths:
+            print(f"  {path}")
+    else:
+        print("Videos: none found")
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    result = run_demo(
+        checkpoint_path=args.checkpoint,
+        episodes=args.episodes,
+        video_dir=args.video_dir,
+        device_name=args.device,
+    )
+    print_summary(result)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
+FILE: envs.py
+================================================
+"""Environment creation and environment-specific metrics."""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+
+from rl_analysis.config import EnvironmentProfile, get_env_profile
+
+
+FREEWAY_ACTION_NOOP = 0
+FREEWAY_ACTION_UP = 1
+FREEWAY_ACTION_DOWN = 2
+
+
+def make_env(env_id: str | EnvironmentProfile, *, seed: int | None = None, render_mode: str | None = None):
+    profile = get_env_profile(env_id) if isinstance(env_id, str) else env_id
+    if profile.env_id == "ALE/Freeway-v5":
+        env = _make_freeway_env(profile, render_mode=render_mode)
+        if seed is not None:
+            env.reset(seed=seed)
+            env.action_space.seed(seed)
+            env.observation_space.seed(seed)
+        return env
+    kwargs: dict[str, Any] = {}
+    if render_mode is not None:
+        kwargs["render_mode"] = render_mode
+    env = gym.make(profile.env_id, **kwargs)
+    if seed is not None:
+        env.reset(seed=seed)
+        env.action_space.seed(seed)
+        env.observation_space.seed(seed)
+    return env
+
+
+def _register_ale() -> None:
+    try:
+        import ale_py
+    except ImportError as exc:
+        raise gym.error.DependencyNotInstalled(
+            'Atari Freeway requires ale-py. Install with `uv pip install "gymnasium[atari]" ale-py`.'
+        ) from exc
+
+    register_envs = getattr(gym, "register_envs", None)
+    if register_envs is not None:
+        register_envs(ale_py)
+
+
+def _make_freeway_env(profile: EnvironmentProfile, *, render_mode: str | None = None):
+    from gymnasium.wrappers import AtariPreprocessing, FrameStackObservation, TransformReward
+
+    _register_ale()
+    kwargs: dict[str, Any] = {
+        "frameskip": profile.raw_frame_skip or 1,
+        "repeat_action_probability": profile.repeat_action_probability
+        if profile.repeat_action_probability is not None
+        else 0.25,
+        "full_action_space": bool(profile.full_action_space),
+    }
+    if render_mode is not None:
+        kwargs["render_mode"] = render_mode
+
+    env = gym.make(profile.env_id, **kwargs)
+    env = AtariPreprocessing(
+        env,
+        noop_max=profile.noop_max or 0,
+        frame_skip=profile.frame_skip or 1,
+        screen_size=profile.resize_shape or 84,
+        terminal_on_life_loss=bool(profile.terminal_on_life_loss),
+        grayscale_obs=bool(profile.grayscale),
+        grayscale_newaxis=False,
+        scale_obs=False,
+    )
+    if profile.reward_clipping:
+        env = TransformReward(env, lambda reward: float(np.sign(float(reward))))
+    if profile.frame_stack and profile.frame_stack > 1:
+        env = FrameStackObservation(env, stack_size=profile.frame_stack)
+    return env
+
+
+def environment_config_dict(profile: EnvironmentProfile) -> dict[str, Any]:
+    payload = asdict(profile)
+    payload["resize_shape"] = list(profile.resize_shape) if profile.resize_shape is not None else None
+    payload["score_thresholds"] = list(profile.score_thresholds)
+    return payload
+
+
+def freeway_up_biased_action_probabilities(action_dim: int, freeway_up_bias: float) -> np.ndarray:
+    if action_dim <= FREEWAY_ACTION_UP:
+        raise ValueError("Freeway up-biased exploration requires an action space with an up action.")
+    if not 0.0 <= freeway_up_bias <= 1.0:
+        raise ValueError("freeway_up_bias must be between 0.0 and 1.0.")
+
+    base_probability = (1.0 - freeway_up_bias) / action_dim
+    probabilities = np.full(action_dim, base_probability, dtype=np.float64)
+    probabilities[FREEWAY_ACTION_UP] += freeway_up_bias
+    return probabilities
+
+
+def lunarlander_episode_metrics(
+    *,
+    episode_return: float,
+    episode_length: int,
+    action_counts: np.ndarray,
+    final_observation: np.ndarray,
+    terminated: bool,
+    truncated: bool,
+) -> dict[str, Any]:
+    safe_length = max(1, episode_length)
+    final = np.asarray(final_observation, dtype=np.float32)
+    both_legs = bool(final[6] > 0.5 and final[7] > 0.5) if final.shape[0] >= 8 else False
+    one_leg = bool((final[6] > 0.5) ^ (final[7] > 0.5)) if final.shape[0] >= 8 else False
+    return {
+        "landing_success": bool(episode_return >= 200.0),
+        "crash": bool(terminated and episode_return < 0.0),
+        "timeout": bool(truncated),
+        "fuel_proxy_main_engine_count": int(action_counts[2]) if action_counts.size > 2 else 0,
+        "fuel_proxy_side_engine_count": int(action_counts[1] + action_counts[3]) if action_counts.size > 3 else 0,
+        "main_engine_action_fraction": float(action_counts[2] / safe_length) if action_counts.size > 2 else 0.0,
+        "side_engine_action_fraction": float((action_counts[1] + action_counts[3]) / safe_length)
+        if action_counts.size > 3
+        else 0.0,
+        "final_x_position": float(final[0]) if final.shape[0] > 0 else None,
+        "final_y_position": float(final[1]) if final.shape[0] > 1 else None,
+        "final_x_velocity": float(final[2]) if final.shape[0] > 2 else None,
+        "final_y_velocity": float(final[3]) if final.shape[0] > 3 else None,
+        "final_angle": float(final[4]) if final.shape[0] > 4 else None,
+        "final_angular_velocity": float(final[5]) if final.shape[0] > 5 else None,
+        "final_left_leg_contact": bool(final[6] > 0.5) if final.shape[0] > 6 else None,
+        "final_right_leg_contact": bool(final[7] > 0.5) if final.shape[0] > 7 else None,
+        "both_legs_contact": both_legs,
+        "one_leg_contact": one_leg,
+    }
+
+
+def freeway_episode_metrics(
+    *,
+    episode_return: float,
+    episode_length: int,
+    action_counts: np.ndarray,
+    max_score_so_far: float,
+) -> dict[str, Any]:
+    safe_length = max(1, episode_length)
+    score = float(episode_return)
+    return {
+        "score": int(round(score)),
+        "score_raw": score,
+        "zero_score_episode": bool(score <= 0.0),
+        "max_score_so_far": float(max_score_so_far),
+        "action_noop_fraction": float(action_counts[FREEWAY_ACTION_NOOP] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_NOOP
+        else 0.0,
+        "action_up_fraction": float(action_counts[FREEWAY_ACTION_UP] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_UP
+        else 0.0,
+        "action_down_fraction": float(action_counts[FREEWAY_ACTION_DOWN] / safe_length)
+        if action_counts.size > FREEWAY_ACTION_DOWN
+        else 0.0,
+    }
+
+
+
+================================================
+FILE: logging_utils.py
+================================================
+"""JSON and JSONL logging helpers for experiment artifacts."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from rl_analysis.utils import to_jsonable, write_json
+
+
+class JSONLLogger:
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self.path.open("a", encoding="utf-8")
+
+    def write(self, row: dict[str, Any]) -> None:
+        import json
+
+        self._handle.write(json.dumps(to_jsonable(row), sort_keys=True) + "\n")
+        self._handle.flush()
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def __enter__(self) -> "JSONLLogger":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+
+class RunLoggers:
+    def __init__(self, run_dir: Path):
+        self.run_dir = run_dir
+        self.train_episode = JSONLLogger(run_dir / "train_episode_metrics.jsonl")
+        self.train_update = JSONLLogger(run_dir / "train_update_metrics.jsonl")
+        self.eval = JSONLLogger(run_dir / "eval_metrics.jsonl")
+        self.checkpoint = JSONLLogger(run_dir / "checkpoint_metrics.jsonl")
+        self.system = JSONLLogger(run_dir / "system_metrics.jsonl")
+
+    def close(self) -> None:
+        self.train_episode.close()
+        self.train_update.close()
+        self.eval.close()
+        self.checkpoint.close()
+        self.system.close()
+
+    def __enter__(self) -> "RunLoggers":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+
+def write_run_config(run_dir: Path, payload: dict[str, Any]) -> None:
+    write_json(run_dir / "run_config.json", payload)
+
+
+def _mps_memory_gb(name: str) -> float | None:
+    if not hasattr(torch, "mps"):
+        return None
+    reader = getattr(torch.mps, name, None)
+    if reader is None:
+        return None
+    try:
+        return float(reader() / 1024**3)
+    except Exception:
+        return None
+
+
+def collect_system_metrics(
+    *,
+    run_id: str,
+    global_env_step: int,
+    device: torch.device,
+    wall_time_start: float,
+    env_steps_per_second: float | None,
+    updates_per_second: float | None,
+    replay_buffer_memory_gb: float | None,
+) -> dict[str, Any]:
+    cpu_percent = None
+    ram_used_gb = None
+    try:
+        import psutil
+
+        cpu_percent = float(psutil.cpu_percent(interval=None))
+        ram_used_gb = float(psutil.virtual_memory().used / 1024**3)
+    except Exception:
+        pass
+
+    gpu_util_percent = None
+    gpu_memory_used_gb = None
+    mps_memory_allocated_gb = None
+    mps_driver_allocated_gb = None
+    mps_recommended_max_memory_gb = None
+    if device.type == "cuda" and torch.cuda.is_available():
+        gpu_memory_used_gb = float(torch.cuda.memory_allocated() / 1024**3)
+    elif device.type == "mps":
+        mps_memory_allocated_gb = _mps_memory_gb("current_allocated_memory")
+        mps_driver_allocated_gb = _mps_memory_gb("driver_allocated_memory")
+        mps_recommended_max_memory_gb = _mps_memory_gb("recommended_max_memory")
+        gpu_memory_used_gb = mps_memory_allocated_gb
+
+    return {
+        "run_id": run_id,
+        "global_env_step": global_env_step,
+        "device": str(device),
+        "wall_time_elapsed_sec": time.perf_counter() - wall_time_start,
+        "env_steps_per_second": env_steps_per_second,
+        "updates_per_second": updates_per_second,
+        "cpu_percent": cpu_percent,
+        "ram_used_gb": ram_used_gb,
+        "gpu_util_percent": gpu_util_percent,
+        "gpu_memory_used_gb": gpu_memory_used_gb,
+        "mps_memory_allocated_gb": mps_memory_allocated_gb,
+        "mps_driver_allocated_gb": mps_driver_allocated_gb,
+        "mps_recommended_max_memory_gb": mps_recommended_max_memory_gb,
+        "replay_buffer_memory_gb": replay_buffer_memory_gb,
+    }
+
+
+
+================================================
+FILE: networks.py
+================================================
+"""Q-network definitions."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import torch
+from torch import nn
+
+from rl_analysis.config import NetworkConfig
+
+
+def _activation(name: str) -> type[nn.Module]:
+    key = name.lower()
+    if key == "relu":
+        return nn.ReLU
+    if key == "tanh":
+        return nn.Tanh
+    if key == "gelu":
+        return nn.GELU
+    raise ValueError(f"Unsupported activation {name!r}.")
+
+
+def _orthogonal_init(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear | nn.Conv2d):
+        nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("relu"))
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+
+class QNetwork(nn.Module):
+    def __init__(
+        self,
+        observation_dim: int,
+        action_dim: int,
+        hidden_layers: list[int],
+        activation: str = "relu",
+        dueling: bool = False,
+    ):
+        super().__init__()
+        self.observation_dim = int(observation_dim)
+        self.action_dim = int(action_dim)
+        self.dueling = bool(dueling)
+
+        act = _activation(activation)
+        layers: list[nn.Module] = []
+        in_dim = self.observation_dim
+        for hidden_dim in hidden_layers:
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(act())
+            in_dim = hidden_dim
+        self.feature_extractor = nn.Sequential(*layers)
+
+        if self.dueling:
+            self.value_head = nn.Linear(in_dim, 1)
+            self.advantage_head = nn.Linear(in_dim, self.action_dim)
+        else:
+            self.q_head = nn.Linear(in_dim, self.action_dim)
+
+        self.apply(_orthogonal_init)
+
+    def forward(self, observations: torch.Tensor, return_streams: bool = False):
+        if observations.ndim == 1:
+            observations = observations.unsqueeze(0)
+        features = self.feature_extractor(observations.float())
+        if self.dueling:
+            value = self.value_head(features)
+            advantage = self.advantage_head(features)
+            q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+            if return_streams:
+                return q_values, {"value": value, "advantage": advantage}
+            return q_values
+        q_values = self.q_head(features)
+        if return_streams:
+            return q_values, {"value": None, "advantage": None}
+        return q_values
+
+
+class CnnQNetwork(nn.Module):
+    def __init__(
+        self,
+        observation_shape: tuple[int, ...],
+        action_dim: int,
+        conv_layers: list[dict[str, int]],
+        fully_connected_layers: list[int],
+        activation: str = "relu",
+        dueling: bool = False,
+    ):
+        super().__init__()
+        if len(observation_shape) != 3:
+            raise ValueError(f"CNN QNetwork expects stacked image observations, got shape {observation_shape}.")
+        self.observation_shape = tuple(int(x) for x in observation_shape)
+        self.action_dim = int(action_dim)
+        self.dueling = bool(dueling)
+
+        act = _activation(activation)
+        channels = self.observation_shape[0]
+        conv_modules: list[nn.Module] = []
+        for layer in conv_layers:
+            conv_modules.append(
+                nn.Conv2d(
+                    channels,
+                    int(layer["out_channels"]),
+                    kernel_size=int(layer["kernel_size"]),
+                    stride=int(layer["stride"]),
+                )
+            )
+            conv_modules.append(act())
+            channels = int(layer["out_channels"])
+        self.conv = nn.Sequential(*conv_modules)
+
+        with torch.no_grad():
+            dummy = torch.zeros(1, *self.observation_shape)
+            conv_output_dim = int(self.conv(dummy).flatten(start_dim=1).shape[1])
+
+        fc_modules: list[nn.Module] = []
+        in_dim = conv_output_dim
+        for hidden_dim in fully_connected_layers:
+            fc_modules.append(nn.Linear(in_dim, hidden_dim))
+            fc_modules.append(act())
+            in_dim = hidden_dim
+        self.feature_head = nn.Sequential(*fc_modules)
+
+        if self.dueling:
+            self.value_head = nn.Linear(in_dim, 1)
+            self.advantage_head = nn.Linear(in_dim, self.action_dim)
+        else:
+            self.q_head = nn.Linear(in_dim, self.action_dim)
+
+        self.apply(_orthogonal_init)
+
+    def forward(self, observations: torch.Tensor, return_streams: bool = False):
+        if observations.ndim == 3:
+            observations = observations.unsqueeze(0)
+        if observations.ndim != 4:
+            raise ValueError(f"CNN QNetwork expects observations with 3 or 4 dims, got {observations.ndim}.")
+        features = self.conv(observations.float() / 255.0).flatten(start_dim=1)
+        features = self.feature_head(features)
+        if self.dueling:
+            value = self.value_head(features)
+            advantage = self.advantage_head(features)
+            q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+            if return_streams:
+                return q_values, {"value": value, "advantage": advantage}
+            return q_values
+        q_values = self.q_head(features)
+        if return_streams:
+            return q_values, {"value": None, "advantage": None}
+        return q_values
+
+
+def build_q_network(observation_shape: tuple[int, ...], action_dim: int, config: NetworkConfig) -> nn.Module:
+    if config.architecture == "cnn":
+        return CnnQNetwork(
+            observation_shape=observation_shape,
+            action_dim=action_dim,
+            conv_layers=config.conv_layers,
+            fully_connected_layers=config.fully_connected_layers,
+            activation=config.activation,
+            dueling=config.dueling_aggregation is not None,
+        )
+    if config.architecture != "mlp":
+        raise ValueError(f"Unsupported network architecture {config.architecture!r}.")
+    if len(observation_shape) != 1:
+        raise ValueError(f"MLP QNetwork expects a flat vector observation, got shape {observation_shape}.")
+    return QNetwork(
+        observation_dim=observation_shape[0],
+        action_dim=action_dim,
+        hidden_layers=config.hidden_layers,
+        activation=config.activation,
+        dueling=config.dueling_aggregation is not None,
+    )
+
+
+def network_architecture_dict(config: NetworkConfig, num_parameters: int) -> dict[str, Any]:
+    if config.architecture == "cnn":
+        return {
+            "architecture": config.architecture,
+            "conv_layers": config.conv_layers,
+            "fully_connected_layers": config.fully_connected_layers,
+            "activation": config.activation,
+            "dueling_aggregation": config.dueling_aggregation,
+            "num_parameters": num_parameters,
+        }
+    return {
+        "architecture": config.architecture,
+        "hidden_layers": config.hidden_layers,
+        "activation": config.activation,
+        "dueling_aggregation": config.dueling_aggregation,
+        "num_parameters": num_parameters,
+        "initializer": config.initializer,
+    }
+
+
+
+================================================
+FILE: replay.py
+================================================
+"""Replay-buffer data structures."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+
+@dataclass
+class Transition:
+    state: np.ndarray
+    action: int
+    reward: float
+    next_state: np.ndarray
+    terminated: bool
+    truncated: bool
+    global_step: int
+    episode_index: int
+
+
+@dataclass
+class TransitionBatch:
+    states: np.ndarray
+    actions: np.ndarray
+    rewards: np.ndarray
+    next_states: np.ndarray
+    terminated: np.ndarray
+    truncated: np.ndarray
+    steps: np.ndarray
+    episode_indices: np.ndarray
+
+    @property
+    def done_for_logging(self) -> np.ndarray:
+        return np.logical_or(self.terminated, self.truncated)
+
+
+def transition_to_batch(transition: Transition) -> TransitionBatch:
+    return TransitionBatch(
+        states=np.expand_dims(np.asarray(transition.state, dtype=np.float32), axis=0),
+        actions=np.asarray([transition.action], dtype=np.int64),
+        rewards=np.asarray([transition.reward], dtype=np.float32),
+        next_states=np.expand_dims(np.asarray(transition.next_state, dtype=np.float32), axis=0),
+        terminated=np.asarray([transition.terminated], dtype=np.bool_),
+        truncated=np.asarray([transition.truncated], dtype=np.bool_),
+        steps=np.asarray([transition.global_step], dtype=np.int64),
+        episode_indices=np.asarray([transition.episode_index], dtype=np.int64),
+    )
+
+
+class ReplayBuffer:
+    def __init__(
+        self,
+        capacity: int,
+        observation_shape: tuple[int, ...],
+        observation_dtype: np.dtype | type | str = np.float32,
+    ):
+        if capacity <= 0:
+            raise ValueError("ReplayBuffer capacity must be positive.")
+        self.capacity = int(capacity)
+        self.observation_shape = tuple(observation_shape)
+        self.observation_dtype = np.dtype(observation_dtype)
+        self.states = np.zeros((self.capacity, *self.observation_shape), dtype=self.observation_dtype)
+        self.next_states = np.zeros((self.capacity, *self.observation_shape), dtype=self.observation_dtype)
+        self.actions = np.zeros(self.capacity, dtype=np.int64)
+        self.rewards = np.zeros(self.capacity, dtype=np.float32)
+        self.terminated = np.zeros(self.capacity, dtype=np.bool_)
+        self.truncated = np.zeros(self.capacity, dtype=np.bool_)
+        self.steps = np.zeros(self.capacity, dtype=np.int64)
+        self.episode_indices = np.zeros(self.capacity, dtype=np.int64)
+        self._pos = 0
+        self._size = 0
+
+    def __len__(self) -> int:
+        return self._size
+
+    def add(self, transition: Transition) -> None:
+        idx = self._pos
+        self.states[idx] = np.asarray(transition.state, dtype=self.observation_dtype)
+        self.next_states[idx] = np.asarray(transition.next_state, dtype=self.observation_dtype)
+        self.actions[idx] = transition.action
+        self.rewards[idx] = transition.reward
+        self.terminated[idx] = transition.terminated
+        self.truncated[idx] = transition.truncated
+        self.steps[idx] = transition.global_step
+        self.episode_indices[idx] = transition.episode_index
+
+        self._pos = (self._pos + 1) % self.capacity
+        self._size = min(self._size + 1, self.capacity)
+
+    def sample(self, batch_size: int, rng: np.random.Generator) -> TransitionBatch:
+        if self._size == 0:
+            raise ValueError("Cannot sample from an empty replay buffer.")
+        if batch_size > self._size:
+            raise ValueError(f"Requested batch_size={batch_size}, but buffer only has {self._size} transitions.")
+        indices = rng.choice(self._size, size=batch_size, replace=False)
+        return TransitionBatch(
+            states=self.states[indices].copy(),
+            actions=self.actions[indices].copy(),
+            rewards=self.rewards[indices].copy(),
+            next_states=self.next_states[indices].copy(),
+            terminated=self.terminated[indices].copy(),
+            truncated=self.truncated[indices].copy(),
+            steps=self.steps[indices].copy(),
+            episode_indices=self.episode_indices[indices].copy(),
+        )
+
+    def memory_gb(self) -> float:
+        total_bytes = (
+            self.states.nbytes
+            + self.next_states.nbytes
+            + self.actions.nbytes
+            + self.rewards.nbytes
+            + self.terminated.nbytes
+            + self.truncated.nbytes
+            + self.steps.nbytes
+            + self.episode_indices.nbytes
+        )
+        return float(total_bytes / 1024**3)
+
+
+def replay_diagnostics(
+    *,
+    batch: TransitionBatch | None,
+    replay_buffer: ReplayBuffer | None,
+    current_step: int,
+    replay_enabled: bool,
+) -> dict[str, Any]:
+    if not replay_enabled:
+        return {
+            "enabled": False,
+            "buffer_size": None,
+            "buffer_capacity": 0,
+            "buffer_fill_fraction": None,
+            "sample_age_mean": 0.0,
+            "sample_age_std": 0.0,
+            "sample_age_min": 0,
+            "sample_age_max": 0,
+            "sample_age_p50": 0.0,
+            "sample_age_p90": 0.0,
+            "sample_reward_mean": float(np.mean(batch.rewards)) if batch is not None else None,
+            "sample_reward_std": float(np.std(batch.rewards)) if batch is not None else None,
+            "sample_done_fraction": float(np.mean(batch.done_for_logging)) if batch is not None else None,
+            "sample_unique_episode_count": 1 if batch is not None else None,
+            "sample_consecutive_transition_fraction": 1.0 if batch is not None else None,
+        }
+
+    size = len(replay_buffer) if replay_buffer is not None else 0
+    capacity = replay_buffer.capacity if replay_buffer is not None else 0
+    if batch is None:
+        return {
+            "enabled": True,
+            "buffer_size": size,
+            "buffer_capacity": capacity,
+            "buffer_fill_fraction": float(size / capacity) if capacity else None,
+            "sample_age_mean": None,
+            "sample_age_std": None,
+            "sample_age_min": None,
+            "sample_age_max": None,
+            "sample_age_p50": None,
+            "sample_age_p90": None,
+            "sample_reward_mean": None,
+            "sample_reward_std": None,
+            "sample_done_fraction": None,
+            "sample_unique_episode_count": None,
+            "sample_consecutive_transition_fraction": None,
+        }
+
+    ages = np.maximum(0, current_step - batch.steps)
+    sorted_steps = np.sort(batch.steps)
+    consecutive = np.diff(sorted_steps) == 1
+    return {
+        "enabled": True,
+        "buffer_size": size,
+        "buffer_capacity": capacity,
+        "buffer_fill_fraction": float(size / capacity) if capacity else None,
+        "sample_age_mean": float(np.mean(ages)),
+        "sample_age_std": float(np.std(ages)),
+        "sample_age_min": int(np.min(ages)),
+        "sample_age_max": int(np.max(ages)),
+        "sample_age_p50": float(np.percentile(ages, 50)),
+        "sample_age_p90": float(np.percentile(ages, 90)),
+        "sample_reward_mean": float(np.mean(batch.rewards)),
+        "sample_reward_std": float(np.std(batch.rewards)),
+        "sample_done_fraction": float(np.mean(batch.done_for_logging)),
+        "sample_unique_episode_count": int(np.unique(batch.episode_indices).size),
+        "sample_consecutive_transition_fraction": float(np.mean(consecutive)) if consecutive.size else 0.0,
+    }
+
+
+
+================================================
+FILE: train.py
+================================================
+"""Command line entrypoint for training DQN experiments."""
+
+from __future__ import annotations
+
+import argparse
+import multiprocessing as mp
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from rl_analysis.config import VARIANT_NAMES, RunConfig, build_run_config
+from rl_analysis.trainer import DQNTrainer
+
+
+DEFAULT_SEEDS = [0, 1, 2, 3, 4]
+
+
+@dataclass(frozen=True)
+class TrainResult:
+    run_id: str
+    run_dir: Path
+    variant: str
+    seed: int
+    final_eval_return_mean: Any
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train DQN ablations on Gymnasium environments.")
+    parser.add_argument("--env", default="LunarLander-v3", help="Environment id or alias.")
+    parser.add_argument("--variant", default="dqn", choices=[*VARIANT_NAMES, "all"], help="Variant to train.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed used when --variant is not all.")
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Seeds to run. Overrides --seed; defaults to 0 1 2 3 4 for --variant all.",
+    )
+    parser.add_argument("--output-root", default="output", help="Root directory for experiment artifacts.")
+    parser.add_argument("--device", default="auto", help="Torch device: auto, cpu, cuda, cuda:N, or mps.")
+    parser.add_argument(
+        "--max-seed-workers",
+        type=_positive_int,
+        default=None,
+        help="Maximum seed processes to run concurrently for each variant. Defaults to all selected seeds.",
+    )
+    parser.add_argument("--serial", action="store_true", help="Run selected seeds one at a time.")
+
+    parser.add_argument("--total-env-steps", type=int, default=None)
+    parser.add_argument("--eval-frequency-env-steps", type=int, default=None)
+    parser.add_argument("--checkpoint-frequency-env-steps", type=int, default=None)
+    parser.add_argument("--num-eval-episodes", type=int, default=None)
+    parser.add_argument("--max-episodes", type=int, default=None)
+    parser.add_argument("--update-log-frequency", type=int, default=None)
+    parser.add_argument("--system-metrics-frequency-env-steps", type=int, default=None)
+
+    parser.add_argument("--learning-starts", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--replay-buffer-size", type=int, default=None)
+    parser.add_argument("--train-frequency-env-steps", type=int, default=None)
+    parser.add_argument("--target-update-frequency-env-steps", type=int, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--epsilon-decay-env-steps", type=int, default=None)
+    parser.add_argument("--epsilon-final", type=float, default=None)
+    parser.add_argument(
+        "--freeway-up-bias",
+        type=float,
+        default=0.0,
+        help="Bias Freeway training exploration toward the up action. Must be in [0, 1].",
+    )
+    return parser.parse_args(argv)
+
+
+def _training_overrides(args: argparse.Namespace) -> dict:
+    mapping = {
+        "total_env_steps": args.total_env_steps,
+        "eval_frequency_env_steps": args.eval_frequency_env_steps,
+        "checkpoint_frequency_env_steps": args.checkpoint_frequency_env_steps,
+        "num_eval_episodes": args.num_eval_episodes,
+        "max_episodes": args.max_episodes,
+        "update_log_frequency": args.update_log_frequency,
+        "system_metrics_frequency_env_steps": args.system_metrics_frequency_env_steps,
+        "device": args.device,
+    }
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
+def _dqn_overrides(args: argparse.Namespace) -> dict:
+    mapping = {
+        "learning_starts": args.learning_starts,
+        "batch_size": args.batch_size,
+        "replay_buffer_size": args.replay_buffer_size,
+        "train_frequency_env_steps": args.train_frequency_env_steps,
+        "target_update_frequency_env_steps": args.target_update_frequency_env_steps,
+        "gamma": args.gamma,
+    }
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
+def _optimizer_overrides(args: argparse.Namespace) -> dict:
+    mapping = {"learning_rate": args.learning_rate}
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
+def _exploration_overrides(args: argparse.Namespace) -> dict:
+    mapping = {
+        "epsilon_decay_env_steps": args.epsilon_decay_env_steps,
+        "epsilon_final": args.epsilon_final,
+        "freeway_up_bias": args.freeway_up_bias,
+    }
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
+def _selected_seeds(args: argparse.Namespace) -> list[int]:
+    if args.seeds is not None:
+        return args.seeds
+    if args.variant == "all":
+        return list(DEFAULT_SEEDS)
+    return [args.seed]
+
+
+def _build_configs(args: argparse.Namespace, variant: str, seeds: list[int]) -> list[RunConfig]:
+    return [
+        build_run_config(
+            env_id=args.env,
+            variant_name=variant,
+            seed=seed,
+            output_root=Path(args.output_root),
+            training_overrides=_training_overrides(args),
+            dqn_overrides=_dqn_overrides(args),
+            optimizer_overrides=_optimizer_overrides(args),
+            exploration_overrides=_exploration_overrides(args),
+        )
+        for seed in seeds
+    ]
+
+
+def _run_config(config: RunConfig) -> TrainResult:
+    summary = DQNTrainer(config).run()
+    return TrainResult(
+        run_id=config.run_id,
+        run_dir=config.run_dir,
+        variant=config.variant.name,
+        seed=config.seed,
+        final_eval_return_mean=summary["performance"]["final_eval_return_mean"],
+    )
+
+
+def _print_completed(result: TrainResult) -> None:
+    print(
+        f"Completed {result.run_id}: final_eval_return_mean={result.final_eval_return_mean}",
+        flush=True,
+    )
+
+
+def _print_failed(config: RunConfig, exc: BaseException) -> None:
+    print(f"Failed {config.run_id} (variant={config.variant.name}, seed={config.seed}): {exc}", file=sys.stderr)
+
+
+def _resolve_max_workers(args: argparse.Namespace, num_configs: int) -> int:
+    if num_configs <= 0:
+        return 0
+    if args.max_seed_workers is None:
+        return num_configs
+    return min(args.max_seed_workers, num_configs)
+
+
+def _run_configs_serial(configs: list[RunConfig]) -> int:
+    failures = 0
+    for config in configs:
+        print(f"Starting {config.run_id} -> {config.run_dir}", flush=True)
+        try:
+            _print_completed(_run_config(config))
+        except Exception as exc:
+            failures += 1
+            _print_failed(config, exc)
+    return failures
+
+
+def _run_configs_parallel(configs: list[RunConfig], max_workers: int) -> int:
+    failures = 0
+    for config in configs:
+        print(f"Starting {config.run_id} -> {config.run_dir}", flush=True)
+    context = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=context) as executor:
+        future_to_config = {executor.submit(_run_config, config): config for config in configs}
+        for future in as_completed(future_to_config):
+            config = future_to_config[future]
+            try:
+                _print_completed(future.result())
+            except Exception as exc:
+                failures += 1
+                _print_failed(config, exc)
+    return failures
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    variants = VARIANT_NAMES if args.variant == "all" else (args.variant,)
+    seeds = _selected_seeds(args)
+    total_failures = 0
+    for variant in variants:
+        configs = _build_configs(args, variant, seeds)
+        max_workers = _resolve_max_workers(args, len(configs))
+        if args.serial or max_workers == 1:
+            total_failures += _run_configs_serial(configs)
+        else:
+            total_failures += _run_configs_parallel(configs, max_workers)
+    if total_failures:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
+FILE: trainer.py
+================================================
+"""Training loop for LunarLander DQN ablations."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+from rl_analysis.agent import DQNAgent
+from rl_analysis.config import RunConfig
+from rl_analysis.envs import (
+    environment_config_dict,
+    freeway_episode_metrics,
+    freeway_up_biased_action_probabilities,
+    lunarlander_episode_metrics,
+    make_env,
+)
+from rl_analysis.logging_utils import RunLoggers, collect_system_metrics, write_run_config
+from rl_analysis.networks import build_q_network, network_architecture_dict
+from rl_analysis.replay import ReplayBuffer, Transition, replay_diagnostics, transition_to_batch
+from rl_analysis.utils import (
+    action_entropy,
+    count_parameters,
+    git_info,
+    hardware_info,
+    numeric_stats,
+    read_jsonl,
+    resolve_device,
+    rolling_mean,
+    rolling_std,
+    set_global_seeds,
+    software_info,
+    to_jsonable,
+    write_json,
+)
+
+
+class DQNTrainer:
+    def __init__(self, config: RunConfig, *, repo_root: Path | None = None):
+        self.config = config
+        self.repo_root = repo_root or Path.cwd()
+        self.rng = np.random.default_rng(config.seed)
+        self.eval_rng = np.random.default_rng(config.seed + 10_000)
+        set_global_seeds(config.seed)
+        self.device = resolve_device(config.training.device)
+
+        self.env = make_env(config.env, seed=config.seed)
+        self.eval_env = make_env(config.env, seed=config.seed + 1_000)
+        observation_shape = tuple(int(x) for x in self.env.observation_space.shape)
+        action_dim = int(self.env.action_space.n)
+        self.observation_storage_dtype = np.uint8 if config.env.observation_type == "image" else np.float32
+
+        online_network = build_q_network(observation_shape, action_dim, config.network)
+        target_network = (
+            build_q_network(observation_shape, action_dim, config.network) if config.variant.use_target_network else None
+        )
+        num_parameters = count_parameters(online_network)
+        self.config.network = replace(self.config.network, num_parameters=num_parameters)
+        self.agent = DQNAgent(
+            online_network=online_network,
+            target_network=target_network,
+            variant=config.variant,
+            dqn_config=config.dqn,
+            optimizer_config=config.optimizer,
+            device=self.device,
+        )
+        self.training_random_action_probabilities = (
+            freeway_up_biased_action_probabilities(action_dim, config.exploration.freeway_up_bias)
+            if config.env.env_id == "ALE/Freeway-v5" and config.exploration.freeway_up_bias > 0.0
+            else None
+        )
+        self.replay_buffer = (
+            ReplayBuffer(
+                config.dqn.replay_buffer_size,
+                observation_shape,
+                observation_dtype=self.observation_storage_dtype,
+            )
+            if config.variant.use_replay_buffer
+            else None
+        )
+        self.run_dir = config.run_dir
+        self.checkpoint_dir = self.run_dir / "checkpoints"
+        self.episode_returns: list[float] = []
+        self.episode_lengths: list[int] = []
+        self.eval_records: list[dict[str, Any]] = []
+        self.update_records: list[dict[str, Any]] = []
+        self.max_score_so_far = 0.0
+        self.failure_flags = {
+            "nan_detected": False,
+            "inf_detected": False,
+            "q_value_explosion": False,
+            "loss_explosion": False,
+            "gradient_explosion": False,
+            "early_terminated": False,
+        }
+        self.wall_time_start = 0.0
+
+    def run(self) -> dict[str, Any]:
+        import time
+
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.config.status = "running"
+        self._write_run_config()
+        self.wall_time_start = time.perf_counter()
+        updates_done = 0
+        last_update_time = self.wall_time_start
+
+        next_eval_step = self.config.training.eval_frequency_env_steps
+        next_checkpoint_step = self.config.training.checkpoint_frequency_env_steps
+        next_system_step = self.config.training.system_metrics_frequency_env_steps
+        latest_eval: dict[str, Any] | None = None
+
+        obs, _ = self.env.reset(seed=self.config.seed)
+        episode_return = 0.0
+        episode_length = 0
+        episode_index = 0
+        episode_start = time.perf_counter()
+        episode_action_counts = np.zeros(self.agent.action_dim, dtype=np.int64)
+        global_step = 0
+
+        with RunLoggers(self.run_dir) as loggers:
+            while global_step < self.config.training.total_env_steps:
+                epsilon = self.config.exploration.epsilon_at(global_step)
+                action = self.agent.select_action(
+                    obs,
+                    epsilon,
+                    self.rng,
+                    random_action_probabilities=self.training_random_action_probabilities,
+                )
+                next_obs, reward, terminated, truncated, _info = self.env.step(action)
+                global_step += 1
+                episode_return += float(reward)
+                episode_length += 1
+                episode_action_counts[action] += 1
+
+                transition = Transition(
+                    state=np.asarray(obs, dtype=self.observation_storage_dtype),
+                    action=action,
+                    reward=float(reward),
+                    next_state=np.asarray(next_obs, dtype=self.observation_storage_dtype),
+                    terminated=bool(terminated),
+                    truncated=bool(truncated),
+                    global_step=global_step,
+                    episode_index=episode_index,
+                )
+                batch_for_update = None
+                if self.replay_buffer is not None:
+                    self.replay_buffer.add(transition)
+                    if self._should_update(global_step):
+                        for _ in range(self.config.dqn.gradient_steps_per_train):
+                            batch_for_update = self.replay_buffer.sample(self.config.dqn.batch_size, self.rng)
+                            update_metrics = self._update_and_log(
+                                batch_for_update, global_step, loggers, updates_done
+                            )
+                            updates_done += 1
+                            self._merge_failure_flags(update_metrics)
+                elif self._should_update(global_step):
+                    batch_for_update = transition_to_batch(transition)
+                    update_metrics = self._update_and_log(batch_for_update, global_step, loggers, updates_done)
+                    updates_done += 1
+                    self._merge_failure_flags(update_metrics)
+
+                self.agent.maybe_update_target(global_step)
+
+                if terminated or truncated:
+                    episode_wall_time = time.perf_counter() - episode_start
+                    self.episode_returns.append(float(episode_return))
+                    self.episode_lengths.append(int(episode_length))
+                    if self.config.env.env_id == "ALE/Freeway-v5":
+                        self.max_score_so_far = max(self.max_score_so_far, float(episode_return))
+                    game_specific = self._episode_game_metrics(
+                        episode_return=episode_return,
+                        episode_length=episode_length,
+                        action_counts=episode_action_counts,
+                        final_observation=np.asarray(next_obs, dtype=self.observation_storage_dtype),
+                        terminated=bool(terminated),
+                        truncated=bool(truncated),
+                    )
+                    loggers.train_episode.write(
+                        {
+                            "run_id": self.config.run_id,
+                            "env_id": self.config.env.env_id,
+                            "variant": self.config.variant.name,
+                            "seed": self.config.seed,
+                            "episode_index": episode_index,
+                            "global_env_step": global_step,
+                            "episode_return": float(episode_return),
+                            "episode_length": episode_length,
+                            "episode_wall_time_sec": episode_wall_time,
+                            "epsilon": epsilon,
+                            "learning_rate": self.config.optimizer.learning_rate,
+                            "replay_buffer_size": len(self.replay_buffer) if self.replay_buffer is not None else 0,
+                            "rolling_return_10": rolling_mean(self.episode_returns, 10),
+                            "rolling_return_50": rolling_mean(self.episode_returns, 50),
+                            "rolling_return_100": rolling_mean(self.episode_returns, 100),
+                            "rolling_length_100": rolling_mean([float(x) for x in self.episode_lengths], 100),
+                            "terminated": bool(terminated),
+                            "truncated": bool(truncated),
+                            "termination_reason": "truncated" if truncated else "environment",
+                            "game_specific": game_specific,
+                        }
+                    )
+                    episode_index += 1
+                    if (
+                        self.config.training.max_episodes is not None
+                        and episode_index >= self.config.training.max_episodes
+                    ):
+                        break
+                    obs, _ = self.env.reset()
+                    episode_return = 0.0
+                    episode_length = 0
+                    episode_start = time.perf_counter()
+                    episode_action_counts = np.zeros(self.agent.action_dim, dtype=np.int64)
+                else:
+                    obs = next_obs
+
+                if global_step >= next_eval_step or global_step >= self.config.training.total_env_steps:
+                    latest_eval = self.evaluate(global_step, len(self.eval_records))
+                    self.eval_records.append(latest_eval)
+                    loggers.eval.write(latest_eval)
+                    next_eval_step += self.config.training.eval_frequency_env_steps
+
+                if global_step >= next_checkpoint_step or global_step >= self.config.training.total_env_steps:
+                    checkpoint_metrics = self.save_checkpoint(global_step, latest_eval)
+                    loggers.checkpoint.write(checkpoint_metrics)
+                    next_checkpoint_step += self.config.training.checkpoint_frequency_env_steps
+
+                if global_step >= next_system_step or global_step >= self.config.training.total_env_steps:
+                    elapsed = time.perf_counter() - self.wall_time_start
+                    since_update = max(1e-9, time.perf_counter() - last_update_time)
+                    loggers.system.write(
+                        collect_system_metrics(
+                            run_id=self.config.run_id,
+                            global_env_step=global_step,
+                            device=self.device,
+                            wall_time_start=self.wall_time_start,
+                            env_steps_per_second=global_step / elapsed if elapsed > 0 else None,
+                            updates_per_second=updates_done / since_update if updates_done else 0.0,
+                            replay_buffer_memory_gb=self.replay_buffer.memory_gb()
+                            if self.replay_buffer is not None
+                            else None,
+                        )
+                    )
+                    next_system_step += self.config.training.system_metrics_frequency_env_steps
+
+        summary = self.build_summary(global_step=global_step, total_updates=updates_done)
+        write_json(self.run_dir / "summary.json", summary)
+        self.config.status = "completed"
+        self.config.datetime_end = datetime.now(timezone.utc).isoformat()
+        self._write_run_config()
+        self.env.close()
+        self.eval_env.close()
+        return summary
+
+    def _episode_game_metrics(
+        self,
+        *,
+        episode_return: float,
+        episode_length: int,
+        action_counts: np.ndarray,
+        final_observation: np.ndarray,
+        terminated: bool,
+        truncated: bool,
+    ) -> dict[str, Any]:
+        if self.config.env.env_id == "ALE/Freeway-v5":
+            return freeway_episode_metrics(
+                episode_return=episode_return,
+                episode_length=episode_length,
+                action_counts=action_counts,
+                max_score_so_far=self.max_score_so_far,
+            )
+        return lunarlander_episode_metrics(
+            episode_return=episode_return,
+            episode_length=episode_length,
+            action_counts=action_counts,
+            final_observation=np.asarray(final_observation, dtype=np.float32),
+            terminated=terminated,
+            truncated=truncated,
+        )
+
+    def _should_update(self, global_step: int) -> bool:
+        if global_step < self.config.dqn.learning_starts:
+            return False
+        if global_step % self.config.dqn.train_frequency_env_steps != 0:
+            return False
+        if self.replay_buffer is not None and len(self.replay_buffer) < self.config.dqn.batch_size:
+            return False
+        return True
+
+    def _update_and_log(
+        self, batch, global_step: int, loggers: RunLoggers, updates_done: int
+    ) -> dict[str, Any]:
+        update_metrics = self.agent.update(batch, global_step)
+        update_metrics.update(
+            {
+                "run_id": self.config.run_id,
+                "env_id": self.config.env.env_id,
+                "variant": self.config.variant.name,
+                "seed": self.config.seed,
+                "replay": replay_diagnostics(
+                    batch=batch,
+                    replay_buffer=self.replay_buffer,
+                    current_step=global_step,
+                    replay_enabled=self.config.variant.use_replay_buffer,
+                ),
+            }
+        )
+        if update_metrics["update_index"] % self.config.training.update_log_frequency == 0:
+            self.update_records.append(update_metrics)
+            loggers.train_update.write(update_metrics)
+        return update_metrics
+
+    def _merge_failure_flags(self, update_metrics: dict[str, Any]) -> None:
+        failures = update_metrics.get("failure_diagnostics", {})
+        for key in self.failure_flags:
+            self.failure_flags[key] = bool(self.failure_flags[key] or failures.get(key, False))
+
+    def evaluate(self, global_step: int, eval_index: int) -> dict[str, Any]:
+        returns = []
+        lengths = []
+        entropies = []
+        action_counts_rows = []
+        game_metric_rows = []
+
+        for episode in range(self.config.training.num_eval_episodes):
+            obs, _ = self.eval_env.reset(seed=self.config.seed + 100_000 + eval_index * 1_000 + episode)
+            done = False
+            episode_return = 0.0
+            episode_length = 0
+            action_counts = np.zeros(self.agent.action_dim, dtype=np.int64)
+            final_obs = obs
+            terminated = False
+            truncated = False
+            while not done:
+                action = self.agent.select_action(obs, self.config.exploration.eval_epsilon, self.eval_rng)
+                obs, reward, terminated, truncated, _info = self.eval_env.step(action)
+                final_obs = obs
+                done = bool(terminated or truncated)
+                episode_return += float(reward)
+                episode_length += 1
+                action_counts[action] += 1
+
+            metrics = self._eval_episode_game_metrics(
+                episode_return=episode_return,
+                episode_length=episode_length,
+                action_counts=action_counts,
+                final_observation=np.asarray(final_obs, dtype=self.observation_storage_dtype),
+                terminated=bool(terminated),
+                truncated=bool(truncated),
+            )
+            returns.append(float(episode_return))
+            lengths.append(float(episode_length))
+            entropies.append(action_entropy(action_counts))
+            action_counts_rows.append(action_counts)
+            game_metric_rows.append(metrics)
+
+        return_stats = numeric_stats(returns)
+        length_stats = numeric_stats(lengths)
+        best_so_far = max([*self.eval_records, {"return_mean": -float("inf")}], key=lambda row: row["return_mean"])
+        if return_stats["mean"] is not None and return_stats["mean"] >= best_so_far["return_mean"]:
+            best_eval_return = return_stats["mean"]
+            best_eval_step = global_step
+        else:
+            best_eval_return = best_so_far["return_mean"]
+            best_eval_step = best_so_far["global_env_step"]
+
+        action_counts_mean = np.mean(np.stack(action_counts_rows, axis=0), axis=0)
+        payload = {
+            "run_id": self.config.run_id,
+            "env_id": self.config.env.env_id,
+            "variant": self.config.variant.name,
+            "seed": self.config.seed,
+            "global_env_step": global_step,
+            "eval_index": eval_index,
+            "num_eval_episodes": self.config.training.num_eval_episodes,
+            "eval_epsilon": self.config.exploration.eval_epsilon,
+            "return_mean": return_stats["mean"],
+            "return_std": return_stats["std"],
+            "return_median": return_stats["median"],
+            "return_min": return_stats["min"],
+            "return_max": return_stats["max"],
+            "return_p25": return_stats["p25"],
+            "return_p75": return_stats["p75"],
+            "episode_length_mean": length_stats["mean"],
+            "episode_length_std": length_stats["std"],
+            "best_eval_return_mean_so_far": best_eval_return,
+            "best_eval_step_so_far": best_eval_step,
+            "action_entropy_mean": float(np.mean(entropies)),
+            "action_entropy_std": float(np.std(entropies)),
+            "action_counts_mean": action_counts_mean.tolist(),
+        }
+        if self.config.env.env_id == "ALE/Freeway-v5":
+            payload["freeway_eval"] = self._freeway_eval_summary(returns, game_metric_rows)
+        else:
+            payload["lunarlander_eval"] = self._lunarlander_eval_summary(returns, game_metric_rows)
+        return payload
+
+    def _eval_episode_game_metrics(
+        self,
+        *,
+        episode_return: float,
+        episode_length: int,
+        action_counts: np.ndarray,
+        final_observation: np.ndarray,
+        terminated: bool,
+        truncated: bool,
+    ) -> dict[str, Any]:
+        if self.config.env.env_id == "ALE/Freeway-v5":
+            return freeway_episode_metrics(
+                episode_return=episode_return,
+                episode_length=episode_length,
+                action_counts=action_counts,
+                max_score_so_far=max(self.max_score_so_far, float(episode_return)),
+            )
+        return lunarlander_episode_metrics(
+            episode_return=episode_return,
+            episode_length=episode_length,
+            action_counts=action_counts,
+            final_observation=np.asarray(final_observation, dtype=np.float32),
+            terminated=terminated,
+            truncated=truncated,
+        )
+
+    def _lunarlander_eval_summary(
+        self, returns: list[float], metric_rows: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        both_legs = [float(row["both_legs_contact"]) for row in metric_rows]
+        one_leg = [float(row["one_leg_contact"]) for row in metric_rows]
+        return {
+            "success_rate": float(np.mean([1.0 if r >= 200.0 else 0.0 for r in returns])),
+            "success_definition": "return >= 200",
+            "landing_success_rate": float(np.mean([row["landing_success"] for row in metric_rows])),
+            "crash_rate": float(np.mean([row["crash"] for row in metric_rows])),
+            "timeout_rate": float(np.mean([row["timeout"] for row in metric_rows])),
+            "main_engine_action_fraction_mean": float(
+                np.mean([row["main_engine_action_fraction"] for row in metric_rows])
+            ),
+            "side_engine_action_fraction_mean": float(
+                np.mean([row["side_engine_action_fraction"] for row in metric_rows])
+            ),
+            "both_legs_contact_rate": float(np.mean(both_legs)),
+            "one_leg_contact_rate": float(np.mean(one_leg)),
+            "no_leg_contact_rate": float(1.0 - np.mean(both_legs) - np.mean(one_leg)),
+        }
+
+    def _freeway_eval_summary(self, returns: list[float], metric_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        score_stats = numeric_stats(returns)
+        threshold_rates = {
+            str(threshold): float(np.mean([1.0 if score >= threshold else 0.0 for score in returns]))
+            for threshold in self.config.env.score_thresholds
+        }
+        return {
+            "score_mean": score_stats["mean"],
+            "score_std": score_stats["std"],
+            "score_median": score_stats["median"],
+            "score_min": score_stats["min"],
+            "score_max": score_stats["max"],
+            "zero_score_rate": float(np.mean([row["zero_score_episode"] for row in metric_rows])),
+            "action_up_fraction_mean": float(np.mean([row["action_up_fraction"] for row in metric_rows])),
+            "action_down_fraction_mean": float(np.mean([row["action_down_fraction"] for row in metric_rows])),
+            "action_noop_fraction_mean": float(np.mean([row["action_noop_fraction"] for row in metric_rows])),
+            "score_threshold_success_rates": threshold_rates,
+        }
+
+    def save_checkpoint(self, global_step: int, latest_eval: dict[str, Any] | None) -> dict[str, Any]:
+        checkpoint_path = self.checkpoint_dir / f"model_step_{global_step}.pt"
+        payload = {
+            "run_id": self.config.run_id,
+            "global_env_step": global_step,
+            "variant": self.config.variant.name,
+            "seed": self.config.seed,
+            "online_network_state_dict": self.agent.online_network.state_dict(),
+            "target_network_state_dict": self.agent.target_network.state_dict()
+            if self.agent.target_network is not None
+            else None,
+            "optimizer_state_dict": self.agent.optimizer.state_dict(),
+            "config": to_jsonable(self.config),
+        }
+        torch.save(payload, checkpoint_path)
+        model_size_mb = checkpoint_path.stat().st_size / 1024**2
+        best_eval = None
+        if latest_eval is not None:
+            best_eval = latest_eval["return_mean"] == latest_eval["best_eval_return_mean_so_far"]
+        return {
+            "run_id": self.config.run_id,
+            "global_env_step": global_step,
+            "checkpoint_index": len(list(self.checkpoint_dir.glob("model_step_*.pt"))),
+            "checkpoint_path": str(checkpoint_path.relative_to(self.run_dir)),
+            "eval_return_mean_at_checkpoint": latest_eval.get("return_mean") if latest_eval else None,
+            "eval_return_std_at_checkpoint": latest_eval.get("return_std") if latest_eval else None,
+            "is_best_checkpoint_so_far": best_eval,
+            "model_size_mb": float(model_size_mb),
+            "optimizer_state_size_mb": None,
+        }
+
+    def build_summary(self, *, global_step: int, total_updates: int) -> dict[str, Any]:
+        eval_returns = [float(row["return_mean"]) for row in self.eval_records if row.get("return_mean") is not None]
+        eval_steps = [int(row["global_env_step"]) for row in self.eval_records]
+        final_eval = self.eval_records[-1] if self.eval_records else None
+        best_eval_return = max(eval_returns) if eval_returns else None
+        best_eval_step = eval_steps[int(np.argmax(eval_returns))] if eval_returns else None
+        auc = float(np.trapezoid(eval_returns, eval_steps)) if len(eval_returns) >= 2 else 0.0
+        normalized_auc = auc / max(1, self.config.training.total_env_steps)
+        first_threshold = self._first_threshold_step(eval_returns, eval_steps)
+        sustained_threshold = self._first_sustained_threshold_step(eval_returns, eval_steps)
+        collapse_count, largest_drop, largest_drop_fraction = self._collapse_metrics(eval_returns)
+        wall_time_total = 0.0
+        if self.wall_time_start:
+            import time
+
+            wall_time_total = time.perf_counter() - self.wall_time_start
+
+        logged_update_rows = read_jsonl(self.run_dir / "train_update_metrics.jsonl")
+        update_source = logged_update_rows or self.update_records
+        last_updates = update_source[-max(1, len(update_source) // 10) :] if update_source else []
+        q_max_values = [
+            row.get("q_values", {}).get("online_q_max")
+            for row in update_source
+            if row.get("q_values", {}).get("online_q_max") is not None
+        ]
+
+        return {
+            "run_id": self.config.run_id,
+            "env_id": self.config.env.env_id,
+            "variant": self.config.variant.name,
+            "seed": self.config.seed,
+            "training_completed": True,
+            "total_env_steps": global_step,
+            "total_ale_frames": self._estimated_ale_frames(global_step),
+            "total_episodes": len(self.episode_returns),
+            "total_updates": total_updates,
+            "performance": {
+                "final_train_return_mean_last_100": rolling_mean(self.episode_returns, 100),
+                "final_train_return_std_last_100": rolling_std(self.episode_returns, 100),
+                "final_eval_return_mean": final_eval.get("return_mean") if final_eval else None,
+                "final_eval_return_std": final_eval.get("return_std") if final_eval else None,
+                "final_eval_return_median": final_eval.get("return_median") if final_eval else None,
+                "best_eval_return_mean": best_eval_return,
+                "best_eval_step": best_eval_step,
+                "area_under_eval_curve": auc,
+                "normalized_area_under_eval_curve": normalized_auc,
+            },
+            "sample_efficiency": {
+                "threshold": self.config.env.success_threshold,
+                "first_step_reaching_threshold": first_threshold,
+                "sustained_threshold_window": self.config.training.sustained_threshold_window,
+                "first_step_sustained_threshold": sustained_threshold,
+                "never_reached_threshold": first_threshold is None,
+            },
+            "stability": {
+                "rolling_return_std_mean": rolling_std(self.episode_returns, min(100, len(self.episode_returns)))
+                if self.episode_returns
+                else None,
+                "rolling_return_std_max": self._rolling_return_std_max(),
+                "eval_return_std_across_time": float(np.std(eval_returns)) if eval_returns else None,
+                "catastrophic_collapse_count": collapse_count,
+                "largest_eval_drop": largest_drop,
+                "largest_eval_drop_fraction": largest_drop_fraction,
+                "collapse_definition": "eval return mean drops by >= 30% from previous best after crossing threshold",
+            },
+            "optimization": self._optimization_summary(last_updates),
+            "q_diagnostics": self._q_summary(last_updates, q_max_values),
+            "replay_diagnostics": self._replay_summary(last_updates),
+            "target_network_diagnostics": self._target_summary(last_updates),
+            "compute": {
+                "wall_time_total_sec": wall_time_total,
+                "env_steps_per_second": global_step / wall_time_total if wall_time_total > 0 else None,
+                "updates_per_second": total_updates / wall_time_total if wall_time_total > 0 else None,
+            },
+            **(
+                {"freeway": self._freeway_summary(eval_returns, eval_steps, final_eval)}
+                if self.config.env.env_id == "ALE/Freeway-v5"
+                else {}
+            ),
+            "failure_diagnostics": dict(self.failure_flags),
+        }
+
+    def _estimated_ale_frames(self, env_steps: int) -> int | None:
+        if self.config.env.frame_skip is None:
+            return None
+        return int(env_steps * self.config.env.frame_skip)
+
+    def _freeway_summary(
+        self,
+        eval_returns: list[float],
+        eval_steps: list[int],
+        final_eval: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        threshold_steps = self._first_steps_for_thresholds(eval_returns, eval_steps, self.config.env.score_thresholds)
+        final_freeway = final_eval.get("freeway_eval", {}) if final_eval else {}
+        return {
+            "final_eval_score_mean": final_eval.get("return_mean") if final_eval else None,
+            "best_eval_score_mean": max(eval_returns) if eval_returns else None,
+            "final_zero_score_rate": final_freeway.get("zero_score_rate"),
+            "score_thresholds": list(self.config.env.score_thresholds),
+            "first_step_reaching_score_thresholds": threshold_steps,
+            "reference_random_score": self.config.env.reference_random_score,
+            "reference_human_score": self.config.env.reference_human_score,
+            "reference_dqn_score": self.config.env.reference_dqn_score,
+        }
+
+    def _first_steps_for_thresholds(
+        self, eval_returns: list[float], eval_steps: list[int], thresholds: tuple[float, ...]
+    ) -> dict[str, int | None]:
+        first_steps: dict[str, int | None] = {}
+        for threshold in thresholds:
+            first_steps[str(threshold)] = None
+            for value, step in zip(eval_returns, eval_steps, strict=False):
+                if value >= threshold:
+                    first_steps[str(threshold)] = step
+                    break
+        return first_steps
+
+    def _first_threshold_step(self, eval_returns: list[float], eval_steps: list[int]) -> int | None:
+        threshold = self.config.env.success_threshold
+        if threshold is None:
+            return None
+        for value, step in zip(eval_returns, eval_steps, strict=False):
+            if value >= threshold:
+                return step
+        return None
+
+    def _first_sustained_threshold_step(self, eval_returns: list[float], eval_steps: list[int]) -> int | None:
+        threshold = self.config.env.success_threshold
+        if threshold is None:
+            return None
+        window = self.config.training.sustained_threshold_window
+        for start in range(0, max(0, len(eval_returns) - window + 1)):
+            chunk = eval_returns[start : start + window]
+            if all(value >= threshold for value in chunk):
+                return eval_steps[start]
+        return None
+
+    def _collapse_metrics(self, eval_returns: list[float]) -> tuple[int, float | None, float | None]:
+        threshold = self.config.env.success_threshold
+        if threshold is None or not eval_returns:
+            return 0, None, None
+        best = -float("inf")
+        crossed = False
+        count = 0
+        largest_drop = 0.0
+        largest_fraction = 0.0
+        for value in eval_returns:
+            if value >= threshold:
+                crossed = True
+            if crossed and best > 0:
+                drop = max(0.0, best - value)
+                fraction = drop / best if best else 0.0
+                if fraction >= 0.30:
+                    count += 1
+                largest_drop = max(largest_drop, drop)
+                largest_fraction = max(largest_fraction, fraction)
+            best = max(best, value)
+        return count, float(largest_drop), float(largest_fraction)
+
+    def _rolling_return_std_max(self) -> float | None:
+        if not self.episode_returns:
+            return None
+        window = min(100, len(self.episode_returns))
+        values = [
+            float(np.std(self.episode_returns[max(0, index - window + 1) : index + 1]))
+            for index in range(len(self.episode_returns))
+        ]
+        return float(np.max(values))
+
+    def _optimization_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "td_loss_mean_last_10pct": None,
+                "td_error_abs_mean_last_10pct": None,
+                "td_error_abs_p95_last_10pct": None,
+                "grad_norm_mean_last_10pct": None,
+                "grad_norm_max": None,
+                "gradient_clip_fraction": None,
+            }
+        return {
+            "td_loss_mean_last_10pct": float(np.mean([row["loss"]["td_loss_mean"] for row in rows])),
+            "td_error_abs_mean_last_10pct": float(np.mean([row["loss"]["td_error_abs_mean"] for row in rows])),
+            "td_error_abs_p95_last_10pct": float(np.mean([row["loss"]["td_error_abs_p95"] for row in rows])),
+            "grad_norm_mean_last_10pct": float(np.mean([row["optimization"]["grad_norm"] for row in rows])),
+            "grad_norm_max": float(np.max([row["optimization"]["grad_norm"] for row in rows])),
+            "gradient_clip_fraction": float(np.mean([row["optimization"]["grad_norm_clipped"] for row in rows])),
+        }
+
+    def _q_summary(self, rows: list[dict[str, Any]], q_max_values: list[float]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "online_q_mean_last_10pct": None,
+                "online_q_max_mean_last_10pct": None,
+                "target_q_mean_last_10pct": None,
+                "mean_q_overestimation_proxy_last_10pct": None,
+                "max_q_value_seen": max(q_max_values) if q_max_values else None,
+            }
+        return {
+            "online_q_mean_last_10pct": float(np.mean([row["q_values"]["online_q_mean"] for row in rows])),
+            "online_q_max_mean_last_10pct": float(np.mean([row["q_values"]["online_q_max_mean"] for row in rows])),
+            "target_q_mean_last_10pct": float(np.mean([row["q_values"]["target_q_mean"] for row in rows])),
+            "mean_q_overestimation_proxy_last_10pct": float(
+                np.mean([row["q_values"]["q_overestimation_proxy"] for row in rows])
+            ),
+            "max_q_value_seen": max(q_max_values) if q_max_values else None,
+        }
+
+    def _replay_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "replay_enabled": self.config.variant.use_replay_buffer,
+                "final_buffer_size": len(self.replay_buffer) if self.replay_buffer is not None else 0,
+                "sample_age_mean_last_10pct": None,
+                "sample_consecutive_transition_fraction_last_10pct": None,
+            }
+        return {
+            "replay_enabled": self.config.variant.use_replay_buffer,
+            "final_buffer_size": len(self.replay_buffer) if self.replay_buffer is not None else 0,
+            "sample_age_mean_last_10pct": float(
+                np.mean([row["replay"]["sample_age_mean"] for row in rows if row["replay"]["sample_age_mean"] is not None])
+            )
+            if any(row["replay"]["sample_age_mean"] is not None for row in rows)
+            else None,
+            "sample_consecutive_transition_fraction_last_10pct": float(
+                np.mean(
+                    [
+                        row["replay"]["sample_consecutive_transition_fraction"]
+                        for row in rows
+                        if row["replay"]["sample_consecutive_transition_fraction"] is not None
+                    ]
+                )
+            )
+            if any(row["replay"]["sample_consecutive_transition_fraction"] is not None for row in rows)
+            else None,
+        }
+
+    def _target_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "target_network_enabled": self.config.variant.use_target_network,
+                "target_update_count": self.agent.target_update_count if self.agent.target_network is not None else None,
+                "online_target_param_l2_mean": None,
+                "online_target_param_l2_max": None,
+            }
+        values = [
+            row["target_network"]["online_target_param_l2"]
+            for row in rows
+            if row["target_network"]["online_target_param_l2"] is not None
+        ]
+        return {
+            "target_network_enabled": self.config.variant.use_target_network,
+            "target_update_count": self.agent.target_update_count if self.agent.target_network is not None else None,
+            "online_target_param_l2_mean": float(np.mean(values)) if values else None,
+            "online_target_param_l2_max": float(np.max(values)) if values else None,
+        }
+
+    def _write_run_config(self) -> None:
+        algorithm = {
+            "base": "DQN",
+            "use_target_network": self.config.variant.use_target_network,
+            "use_replay_buffer": self.config.variant.use_replay_buffer,
+            "use_double_dqn": self.config.variant.use_double_dqn,
+            "use_dueling_network": self.config.variant.use_dueling_network,
+            "use_prioritized_replay": False,
+            "use_noisy_network": False,
+            "use_reward_clipping": self.config.variant.use_reward_clipping or self.config.env.reward_clipping,
+        }
+        payload = {
+            "run_id": self.config.run_id,
+            "experiment_group": self.config.experiment_group,
+            "env_id": self.config.env.env_id,
+            "variant": self.config.variant.name,
+            "variant_label": self.config.variant.label,
+            "seed": self.config.seed,
+            "datetime_start": self.config.datetime_start,
+            "datetime_end": self.config.datetime_end,
+            "status": self.config.status,
+            "algorithm": algorithm,
+            "training_budget": {
+                "total_env_steps": self.config.training.total_env_steps,
+                "max_episodes": self.config.training.max_episodes,
+                "max_episode_steps": self.config.env.max_episode_steps,
+                "num_seeds": self.config.training.num_seeds,
+                "eval_frequency_env_steps": self.config.training.eval_frequency_env_steps,
+                "checkpoint_frequency_env_steps": self.config.training.checkpoint_frequency_env_steps,
+                "agent_step_to_ale_frame_multiplier": self.config.env.frame_skip,
+                "estimated_total_ale_frames": self._estimated_ale_frames(self.config.training.total_env_steps),
+            },
+            "environment": environment_config_dict(self.config.env),
+            "network": network_architecture_dict(self.config.network, self.config.network.num_parameters or 0),
+            "optimizer": asdict(self.config.optimizer),
+            "dqn_hyperparameters": asdict(self.config.dqn),
+            "exploration": asdict(self.config.exploration),
+            "software": software_info(),
+            "hardware": hardware_info(self.device),
+            "code": git_info(self.repo_root),
+        }
+        write_run_config(self.run_dir, payload)
+
+
+
+================================================
+FILE: utils.py
+================================================
+"""Small shared utilities."""
+
+from __future__ import annotations
+
+import json
+import os
+import platform
+import random
+import subprocess
+import sys
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+import torch
+
+
+def _mps_backend_available() -> bool:
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
+def _mps_backend_built() -> bool:
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built())
+
+
+def _mps_unavailable_message() -> str:
+    if not hasattr(torch.backends, "mps"):
+        return "MPS device requested, but this PyTorch install does not expose torch.backends.mps."
+    if not torch.backends.mps.is_built():
+        return "MPS device requested, but this PyTorch install was not built with MPS support."
+    return (
+        "MPS device requested, but MPS is not available. Use an Apple Silicon Mac with Metal support, "
+        "macOS 14.0 or newer, and an MPS-capable PyTorch install."
+    )
+
+
+def set_global_seeds(seed: int) -> None:
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, "mps") and torch.mps.is_available():
+        torch.mps.manual_seed(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = False
+
+
+def resolve_device(device_name: str) -> torch.device:
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if _mps_backend_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    device = torch.device(device_name)
+    if device.type == "mps" and not _mps_backend_available():
+        raise RuntimeError(_mps_unavailable_message())
+    return device
+
+
+def to_jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return to_jsonable(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return value.detach().cpu().item()
+        return value.detach().cpu().tolist()
+    return value
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def numeric_stats(values: Iterable[float]) -> dict[str, float | None]:
+    arr = np.asarray(list(values), dtype=np.float64)
+    if arr.size == 0:
+        return {"mean": None, "std": None, "median": None, "min": None, "max": None, "p25": None, "p75": None}
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "median": float(np.median(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "p25": float(np.percentile(arr, 25)),
+        "p75": float(np.percentile(arr, 75)),
+    }
+
+
+def rolling_mean(values: list[float], window: int) -> float | None:
+    if not values:
+        return None
+    sample = values[-window:]
+    return float(np.mean(sample))
+
+
+def rolling_std(values: list[float], window: int) -> float | None:
+    if not values:
+        return None
+    sample = values[-window:]
+    return float(np.std(sample))
+
+
+def action_entropy(action_counts: np.ndarray) -> float:
+    total = int(np.sum(action_counts))
+    if total == 0:
+        return 0.0
+    probs = action_counts.astype(np.float64) / total
+    probs = probs[probs > 0]
+    return float(-np.sum(probs * np.log(probs)))
+
+
+def count_parameters(model: torch.nn.Module) -> int:
+    return int(sum(param.numel() for param in model.parameters()))
+
+
+def git_info(repo_root: Path) -> dict[str, Any]:
+    def run_git(args: list[str]) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+        return result.stdout.strip()
+
+    branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    commit = run_git(["rev-parse", "HEAD"])
+    dirty = run_git(["status", "--porcelain"])
+    return {
+        "git_commit": commit,
+        "git_branch": branch,
+        "dirty_working_tree": bool(dirty),
+    }
+
+
+def software_info() -> dict[str, Any]:
+    info = {
+        "python_version": sys.version.split()[0],
+        "platform": platform.platform(),
+        "torch_version": torch.__version__,
+        "numpy_version": np.__version__,
+    }
+    try:
+        import gymnasium
+
+        info["gymnasium_version"] = gymnasium.__version__
+    except Exception:
+        info["gymnasium_version"] = None
+    try:
+        import ale_py
+
+        info["ale_py_version"] = ale_py.__version__
+    except Exception:
+        info["ale_py_version"] = None
+    return info
+
+
+def hardware_info(device: torch.device) -> dict[str, Any]:
+    gpu_name = None
+    if device.type == "cuda" and torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(device)
+    elif device.type == "mps" and _mps_backend_available():
+        gpu_name = "Apple Metal GPU"
+    cpu_name = platform.processor() or os.uname().machine
+    return {
+        "device": str(device),
+        "gpu_name": gpu_name,
+        "cpu_name": cpu_name,
+        "ram_gb": None,
+        "mps_available": _mps_backend_available(),
+        "mps_built": _mps_backend_built(),
+    }
+
+

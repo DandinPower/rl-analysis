@@ -1,0 +1,8 @@
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.11\textwidth}>{\raggedright\arraybackslash}p{0.18\textwidth}>{\raggedright\arraybackslash}p{0.18\textwidth}>{\raggedright\arraybackslash}p{0.14\textwidth}Y@{}}
+\toprule
+\textbf{Task} & \textbf{Observation} & \textbf{Action Space} & \textbf{Success Signal} & \textbf{Reason for Selection} \\
+\midrule
+Lunar Lander & Vector state with position, velocity, angle, and leg contacts. & no-op, left engine, main engine, right engine. & Episode return at least 200. & Shaped rewards and a compact state make it useful for studying stability and sample efficiency. \\
+Atari Freeway & Stacked 84 by 84 grayscale Atari frames after preprocessing. & no-op, up, down. & Score at least 15; one point is earned for each crossing. & Sparse visual rewards make it useful for testing representation learning and policy retention. \\
+\bottomrule
+\end{tabularx}

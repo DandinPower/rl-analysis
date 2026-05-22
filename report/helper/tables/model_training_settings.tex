@@ -1,0 +1,15 @@
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.18\textwidth}YY@{}}
+\toprule
+\textbf{Setting} & \textbf{Lunar Lander} & \textbf{Atari Freeway} \\
+\midrule
+Variants and seeds & DQN, no-target, no-replay, Double DQN, Dueling DQN, and Double + Dueling DQN. Seeds 0-9. & DQN, no-target, no-replay, Double DQN, Dueling DQN, and Double + Dueling DQN. Seeds 0-3. \\
+Training budget & 500,000 environment steps. & 1,000,000 agent steps; 4,000,000 estimated ALE frames. \\
+Evaluation and checkpoints & 20 evaluation episodes every 10,000 steps; checkpoints every 50,000 steps; evaluation epsilon 0.001. & 20 evaluation episodes every 10,000 steps; checkpoints every 50,000 steps; evaluation epsilon 0.001. \\
+Input preprocessing & Raw 8-value state vector; no reward clipping. & 84 by 84 grayscale frames; frame skip 4; no-op max 30; four-frame stack; clipped rewards. \\
+Optimizer & Adam with learning rate 0.0005, epsilon 1e-08, weight decay 0, and gradient clipping at 10. & Adam with learning rate 6.25e-05, epsilon 0.00015, weight decay 0, and gradient clipping at 10. \\
+Common DQN update & Gamma 0.99; train every 4 environment steps after 5,000 learning-start steps; 1 gradient step per update. & Gamma 0.99; train every 4 environment steps after 20,000 learning-start steps; 1 gradient step per update. \\
+Replay and target defaults & Replay size 100,000; batch size 64; hard target update every 1,000 steps; target tau 1. & Replay size 25,000; batch size 32; hard target update every 8,000 steps; target tau 1. \\
+No-replay override & Replay size 0; batch size 1; learning starts 0; train every 1 step. & Replay size 0; batch size 1; learning starts 0; train every 1 step. \\
+Exploration schedule & Epsilon-greedy from 1 to 0.05 over 100,000 steps. & Epsilon-greedy from 1 to 0.01 over 250,000 steps. \\
+\bottomrule
+\end{tabularx}

@@ -1,0 +1,7 @@
+variant,target_network,replay_buffer,double_dqn_update,dueling_network_head,role,expected_effect
+DQN,True,True,False,False,Baseline with replay and a separate target network.,Set the reference for learning speed and stability in both tasks.
+DQN without target network,False,True,False,False,Ablation of the slow-moving bootstrap target.,More oscillation and weaker policy retention because the target changes every update.
+DQN without replay buffer,True,False,False,False,Ablation of decorrelated sampling and transition reuse.,"Less stable learning from recent correlated data, especially when rewards are sparse."
+Double DQN,True,True,True,False,Extension that separates next-action selection from next-action evaluation.,Lower overestimation risk and better final reliability than the baseline.
+Dueling DQN,True,True,False,True,Extension that predicts state value and action advantages with separate streams.,Better value learning when several actions have similar value in the same state.
+Double + Dueling DQN,True,True,True,True,Combined extension that tests whether the two improvements are complementary.,"Potentially stronger stability and value estimates, but not guaranteed additive gains."

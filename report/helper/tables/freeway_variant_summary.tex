@@ -1,0 +1,14 @@
+\begin{adjustbox}{width=\textwidth}
+\begin{tabular}{@{}lccccccccc@{}}
+\toprule
+\textbf{Variant} & \textbf{Best Eval} & \textbf{Final Eval} & \textbf{Reached 15} & \textbf{Sustained 15} & \textbf{First 15} & \textbf{Reached 22.5} & \textbf{Final Zero} & \textbf{Up Action} & \textbf{Peak Gap} \\
+\midrule
+DQN & 29.1 $\pm$ 0.8 & 28.3 $\pm$ 0.7 & 4/4 & 4/4 & 198k & 4/4 & 0.0\% & 79.8\% & 0.8 \\
+No Target & 29.3 $\pm$ 0.3 & 27.2 $\pm$ 1.2 & 4/4 & 4/4 & 55k & 4/4 & 0.0\% & 76.2\% & 2.1 \\
+No Replay & 21.6 $\pm$ 2.8 & 5.8 $\pm$ 9.7 & 4/4 & 1/4 & 32k & 2/4 & 56.2\% & 30.0\% & 15.7 \\
+Double DQN & 29.7 $\pm$ 0.9 & 29.3 $\pm$ 1.1 & 4/4 & 4/4 & 238k & 4/4 & 0.0\% & 80.0\% & 0.4 \\
+Dueling DQN & 29.7 $\pm$ 0.5 & 28.9 $\pm$ 0.8 & 4/4 & 4/4 & 245k & 4/4 & 0.0\% & 77.9\% & 0.8 \\
+Double + Dueling & 29.2 $\pm$ 0.2 & 28.3 $\pm$ 0.8 & 4/4 & 4/4 & 145k & 4/4 & 0.0\% & 79.4\% & 0.9 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
